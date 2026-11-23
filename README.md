@@ -46,7 +46,7 @@ Designed to work either in **Modern (GTA 6)** borderless overlay mode rendered v
 - **Fallout 4** Next-Gen / Anniversary Edition (`1.10.980+` / `1.11.x`)
 - **[F4SE (Fallout 4 Script Extender)](https://f4se.silverlock.org/)**
 - **[Address Library for F4SE Plugins](https://www.nexusmods.com/fallout4/mods/47327)**
-- **[F4SE Menu Framework](https://www.nexusmods.com/fallout4/mods/95567)** (required for Modern overlay rendering, custom fonts, and the live F1 editor)
+- **[F4SE Menu Framework](https://www.nexusmods.com/fallout4/mods/105090)** (required for Modern overlay rendering, custom fonts, and the live F1 editor)
 - **Optional:**
   - **[Mod Configuration Menu (MCM)](https://www.nexusmods.com/fallout4/mods/21497)**
   - **[FallUI - Icon Library](https://www.nexusmods.com/fallout4/mods/60579)** / **FIS (FallUI Item Sorter)** (automatically detected; falls back to FontAwesome if not installed)
