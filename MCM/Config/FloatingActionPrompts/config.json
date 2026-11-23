@@ -1,0 +1,540 @@
+{
+  "modName": "FloatingActionPrompts",
+  "displayName": "FAP - Floating Action Prompts",
+  "author": "ArthoriousX",
+  "version": "1.0.0",
+  "minMcmVersion": 1,
+  "pages": [
+    {
+      "pageDisplayName": "General",
+      "content": [
+        { "type": "section", "text": "General" },
+        {
+          "type": "switcher",
+          "id": "bEnabled:General",
+          "text": "Enable Floating Prompts",
+          "help": "Anchor single-action HUD prompts dynamically in 3D world space on the targeted object.",
+          "valueOptions": { "sourceType": "ModSettingBool" }
+        },
+        {
+          "type": "switcher",
+          "id": "bPowerArmorBypass:General",
+          "text": "Bypass in Power Armor",
+          "help": "Keep vanilla visor prompt placement while wearing Power Armor.",
+          "valueOptions": { "sourceType": "ModSettingBool" }
+        },
+        {
+          "type": "switcher",
+          "id": "bEnableClamping:General",
+          "text": "Clamp to Screen Edges",
+          "help": "Prevent prompts from drifting outside safe screen margins.",
+          "valueOptions": { "sourceType": "ModSettingBool" }
+        },
+        {
+          "type": "slider",
+          "id": "fSmoothingSpeed:General",
+          "text": "Smoothing Speed",
+          "help": "Interpolation factor per frame. Higher values track faster; lower values move smoother.",
+          "valueOptions": { "min": 0.05, "max": 1.0, "step": 0.05, "sourceType": "ModSettingFloat" }
+        },
+        {
+          "type": "slider",
+          "id": "fEdgeMargin:General",
+          "text": "Screen Edge Margin (px)",
+          "help": "Safe padding in pixels from screen borders when clamping is enabled.",
+          "valueOptions": { "min": 0, "max": 400, "step": 5, "sourceType": "ModSettingFloat" }
+        }
+      ]
+    },
+    {
+      "pageDisplayName": "3D Offsets",
+      "content": [
+        { "type": "section", "text": "Doors" },
+        { "type": "slider", "id": "fDoorOffsetX:Offsets", "text": "Door Offset X", "help": "Horizontal world offset for doors.", "valueOptions": { "min": -100, "max": 100, "step": 1, "sourceType": "ModSettingFloat" } },
+        { "type": "slider", "id": "fDoorOffsetY:Offsets", "text": "Door Offset Y", "help": "Depth world offset for doors.", "valueOptions": { "min": -100, "max": 100, "step": 1, "sourceType": "ModSettingFloat" } },
+        { "type": "slider", "id": "fDoorOffsetZ:Offsets", "text": "Door Offset Z (Below Lock)", "help": "Vertical world offset for doors.", "valueOptions": { "min": -100, "max": 100, "step": 1, "sourceType": "ModSettingFloat" } },
+        { "type": "section", "text": "NPCs & Actors" },
+        { "type": "slider", "id": "fNpcOffsetX:Offsets", "text": "NPC Offset X", "help": "Horizontal world offset for NPCs.", "valueOptions": { "min": -100, "max": 100, "step": 1, "sourceType": "ModSettingFloat" } },
+        { "type": "slider", "id": "fNpcOffsetY:Offsets", "text": "NPC Offset Y", "help": "Depth world offset for NPCs.", "valueOptions": { "min": -100, "max": 100, "step": 1, "sourceType": "ModSettingFloat" } },
+        { "type": "slider", "id": "fNpcOffsetZ:Offsets", "text": "NPC Offset Z (Chest/Torso)", "help": "Vertical world offset for NPCs.", "valueOptions": { "min": -100, "max": 100, "step": 1, "sourceType": "ModSettingFloat" } },
+        { "type": "section", "text": "Containers" },
+        { "type": "slider", "id": "fContainerOffsetX:Offsets", "text": "Container Offset X", "help": "Horizontal world offset for containers.", "valueOptions": { "min": -100, "max": 100, "step": 1, "sourceType": "ModSettingFloat" } },
+        { "type": "slider", "id": "fContainerOffsetY:Offsets", "text": "Container Offset Y", "help": "Depth world offset for containers.", "valueOptions": { "min": -100, "max": 100, "step": 1, "sourceType": "ModSettingFloat" } },
+        { "type": "slider", "id": "fContainerOffsetZ:Offsets", "text": "Container Offset Z (Lid)", "help": "Vertical world offset for containers.", "valueOptions": { "min": -100, "max": 100, "step": 1, "sourceType": "ModSettingFloat" } },
+        { "type": "section", "text": "Loose Items" },
+        { "type": "slider", "id": "fItemOffsetX:Offsets", "text": "Item Offset X", "help": "Horizontal world offset for loose items.", "valueOptions": { "min": -100, "max": 100, "step": 1, "sourceType": "ModSettingFloat" } },
+        { "type": "slider", "id": "fItemOffsetY:Offsets", "text": "Item Offset Y", "help": "Depth world offset for loose items.", "valueOptions": { "min": -100, "max": 100, "step": 1, "sourceType": "ModSettingFloat" } },
+        { "type": "slider", "id": "fItemOffsetZ:Offsets", "text": "Item Offset Z", "help": "Vertical world offset for loose items.", "valueOptions": { "min": -100, "max": 100, "step": 1, "sourceType": "ModSettingFloat" } },
+        { "type": "section", "text": "Terminals & Furniture" },
+        { "type": "slider", "id": "fFurnitureOffsetX:Offsets", "text": "Terminal / Furniture Offset X", "help": "Horizontal world offset for terminals, workbenches, and furniture.", "valueOptions": { "min": -100, "max": 100, "step": 1, "sourceType": "ModSettingFloat" } },
+        { "type": "slider", "id": "fFurnitureOffsetY:Offsets", "text": "Terminal / Furniture Offset Y", "help": "Depth world offset for terminals, workbenches, and furniture.", "valueOptions": { "min": -100, "max": 100, "step": 1, "sourceType": "ModSettingFloat" } },
+        { "type": "slider", "id": "fFurnitureOffsetZ:Offsets", "text": "Terminal / Furniture Offset Z", "help": "Vertical world offset for terminals, workbenches, and furniture.", "valueOptions": { "min": -100, "max": 100, "step": 1, "sourceType": "ModSettingFloat" } }
+      ]
+    },
+    {
+      "pageDisplayName": "Visual Style",
+      "content": [
+        { "type": "section", "text": "Prompt Aesthetic" },
+        {
+          "type": "stepper",
+          "id": "iPromptStyle:Visual",
+          "text": "Prompt Style",
+          "help": "Vanilla preserves native HUDMenu styling (FallUI/BRAVOHUD). Modern (GTA 6) draws a sleek clean floating prompt.",
+          "valueOptions": {
+            "sourceType": "ModSettingInt",
+            "options": ["Vanilla", "Modern (GTA 6)"]
+          }
+        },
+        {
+          "type": "stepper",
+          "id": "iButtonIconStyle:Visual",
+          "text": "Button Icon Style",
+          "help": "Choose input glyphs displayed in Modern prompt style.",
+          "valueOptions": {
+            "sourceType": "ModSettingInt",
+            "options": ["Keyboard (E/R)", "PlayStation (Colored)", "Xbox (Colored)", "PlayStation (Monochrome)", "Xbox (Monochrome)"]
+          }
+        },
+        {
+          "type": "stepper",
+          "id": "iIconLibrary:Visual",
+          "text": "Icon Library",
+          "help": "Choose between built-in FontAwesome glyphs or your installed FallUI - Icon Library / Icon Expansion Pack icons.",
+          "valueOptions": {
+            "sourceType": "ModSettingInt",
+            "options": ["FontAwesome", "FallUI Icon Library"]
+          }
+        },
+        {
+          "type": "stepper",
+          "id": "iModernTextMode:Visual",
+          "text": "Modern Text Mode",
+          "help": "Choose whether Modern prompts show Action Only (GTA 6), Action + Name, or Name only on world objects.",
+          "valueOptions": {
+            "sourceType": "ModSettingInt",
+            "options": ["Action Only (GTA 6)", "Action + Name", "Name on World Objects"]
+          }
+        },
+        {
+          "type": "switcher",
+          "id": "bCleanSorterTags:Visual",
+          "text": "Clean FIS / Sorter Tags",
+          "help": "Strip [Scrap] and {{Aluminum, Oil}} item sorter tags from prompts, QuickContainer lists, and the Info Card header.",
+          "valueOptions": { "sourceType": "ModSettingBool" }
+        },
+        {
+          "type": "switcher",
+          "id": "bModernShowItemIcon:Visual",
+          "text": "Show Item/Category Icon",
+          "help": "Master toggle for displaying a category icon next to the primary action verb in Modern style.",
+          "valueOptions": { "sourceType": "ModSettingBool" }
+        },
+        {
+          "type": "switcher",
+          "id": "bColoredCategoryIcons:Visual",
+          "text": "Colored Category Icons",
+          "help": "Use per-category accent colors (similar to FallUI/FIS icons) instead of a single uniform icon color.",
+          "valueOptions": { "sourceType": "ModSettingBool" }
+        },
+        {
+          "type": "stepper",
+          "id": "iMultiActionLayout:Visual",
+          "text": "Multi-Action Layout",
+          "help": "Arrange multiple prompts on companions, workbenches, or modded objects vertically stacked (Modern) or horizontally inline.",
+          "valueOptions": {
+            "sourceType": "ModSettingInt",
+            "options": ["Stacked Vertical (Modern)", "Inline Horizontal"]
+          }
+        },
+        {
+          "type": "slider",
+          "id": "fModernActionGap:Visual",
+          "text": "Multi-Action Row Spacing",
+          "help": "Vertical gap in pixels between stacked actions when multiple prompts are active.",
+          "valueOptions": { "min": 0.0, "max": 24.0, "step": 1.0, "sourceType": "ModSettingFloat" }
+        },
+        { "type": "section", "text": "Category Icons (Master Switch Required)" },
+        { "type": "switcher", "id": "bIconWeapon:Visual", "text": "Show Weapon Icon", "valueOptions": { "sourceType": "ModSettingBool" } },
+        { "type": "switcher", "id": "bIconArmor:Visual", "text": "Show Armor Icon", "valueOptions": { "sourceType": "ModSettingBool" } },
+        { "type": "switcher", "id": "bIconAid:Visual", "text": "Show Aid / Chem Icon", "valueOptions": { "sourceType": "ModSettingBool" } },
+        { "type": "switcher", "id": "bIconAmmo:Visual", "text": "Show Ammo Icon", "valueOptions": { "sourceType": "ModSettingBool" } },
+        { "type": "switcher", "id": "bIconMiscJunk:Visual", "text": "Show Misc / Junk Icon", "valueOptions": { "sourceType": "ModSettingBool" } },
+        { "type": "switcher", "id": "bIconKey:Visual", "text": "Show Key Icon", "valueOptions": { "sourceType": "ModSettingBool" } },
+        { "type": "switcher", "id": "bIconBookNote:Visual", "text": "Show Book / Note Icon", "valueOptions": { "sourceType": "ModSettingBool" } },
+        { "type": "switcher", "id": "bIconHolotape:Visual", "text": "Show Holotape Icon", "valueOptions": { "sourceType": "ModSettingBool" } },
+        { "type": "switcher", "id": "bIconContainer:Visual", "text": "Show Container Icon", "valueOptions": { "sourceType": "ModSettingBool" } },
+        { "type": "switcher", "id": "bIconDoor:Visual", "text": "Show Door Icon", "valueOptions": { "sourceType": "ModSettingBool" } },
+        { "type": "switcher", "id": "bIconFurniture:Visual", "text": "Show Furniture / Bed / Workbench Icon", "valueOptions": { "sourceType": "ModSettingBool" } },
+        { "type": "switcher", "id": "bIconTerminal:Visual", "text": "Show Terminal Icon", "valueOptions": { "sourceType": "ModSettingBool" } },
+        { "type": "switcher", "id": "bIconNpc:Visual", "text": "Show NPC / Companion Icon", "valueOptions": { "sourceType": "ModSettingBool" } },
+        { "type": "section", "text": "Prompt Element Sizes & Screen Position" },
+        {
+          "type": "slider",
+          "id": "fModernScale:Visual",
+          "text": "Modern Prompt Overall Scale",
+          "help": "Overall scale multiplier for Modern GTA-6 prompt elements.",
+          "valueOptions": { "min": 0.5, "max": 2.5, "step": 0.05, "sourceType": "ModSettingFloat" }
+        },
+        {
+          "type": "slider",
+          "id": "fModernButtonSize:Visual",
+          "text": "Button / Keycap Size",
+          "help": "Independent size multiplier for keycaps and gamepad button icons.",
+          "valueOptions": { "min": 0.5, "max": 2.5, "step": 0.05, "sourceType": "ModSettingFloat" }
+        },
+        {
+          "type": "slider",
+          "id": "fModernKeyTextScale:Visual",
+          "text": "Inner Button Key Text Size",
+          "help": "Relative font size of the key character inside the button badge (e.g. 'E').",
+          "valueOptions": { "min": 0.40, "max": 1.20, "step": 0.02, "sourceType": "ModSettingFloat" }
+        },
+        {
+          "type": "slider",
+          "id": "fModernActionTextScale:Visual",
+          "text": "Action Label Text Size",
+          "help": "Independent text size multiplier for verbs and target names.",
+          "valueOptions": { "min": 0.5, "max": 2.5, "step": 0.05, "sourceType": "ModSettingFloat" }
+        },
+        {
+          "type": "slider",
+          "id": "fModernIconScale:Visual",
+          "text": "Category Icon Size",
+          "help": "Independent size multiplier for the category icon next to the action.",
+          "valueOptions": { "min": 0.5, "max": 2.5, "step": 0.05, "sourceType": "ModSettingFloat" }
+        },
+        {
+          "type": "slider",
+          "id": "fModernScreenOffsetX:Visual",
+          "text": "Modern Screen Offset X (px)",
+          "help": "Horizontal screen-space pixel offset for Modern prompts.",
+          "valueOptions": { "min": -200, "max": 200, "step": 2, "sourceType": "ModSettingFloat" }
+        },
+        {
+          "type": "slider",
+          "id": "fModernScreenOffsetY:Visual",
+          "text": "Modern Screen Offset Y (px)",
+          "help": "Vertical screen-space pixel offset for Modern prompts.",
+          "valueOptions": { "min": -200, "max": 200, "step": 2, "sourceType": "ModSettingFloat" }
+        },
+        {
+          "type": "slider",
+          "id": "fModernOpacity:Visual",
+          "text": "Modern Prompt Opacity",
+          "help": "Overall opacity of Modern prompt elements.",
+          "valueOptions": { "min": 0.1, "max": 1.0, "step": 0.05, "sourceType": "ModSettingFloat" }
+        },
+        { "type": "section", "text": "Modern Box & Layout (Colors adjustable via F1 Menu)" },
+        {
+          "type": "slider",
+          "id": "fModernBgOpacity:Visual",
+          "text": "Modern Background Opacity (0 = Clean)",
+          "help": "Background box opacity behind Modern prompts. Default 0.0 gives a clean borderless GTA-6 look.",
+          "valueOptions": { "min": 0.0, "max": 1.0, "step": 0.05, "sourceType": "ModSettingFloat" }
+        },
+        {
+          "type": "switcher",
+          "id": "bModernBorder:Visual",
+          "text": "Show Prompt Border",
+          "help": "Draw a subtle 1px outline around Modern prompts.",
+          "valueOptions": { "sourceType": "ModSettingBool" }
+        },
+        {
+          "type": "switcher",
+          "id": "bModernTextShadow:Visual",
+          "text": "Enable Text Drop Shadow",
+          "help": "Draw a crisp shadow behind Modern text and icons for readability over bright backgrounds.",
+          "valueOptions": { "sourceType": "ModSettingBool" }
+        },
+        {
+          "type": "slider",
+          "id": "fModernRounding:Visual",
+          "text": "Modern Corner Rounding",
+          "help": "Corner radius in pixels for Modern prompt boxes and keycaps.",
+          "valueOptions": { "min": 0.0, "max": 24.0, "step": 1.0, "sourceType": "ModSettingFloat" }
+        },
+        {
+          "type": "slider",
+          "id": "fModernPadX:Visual",
+          "text": "Modern Horizontal Padding",
+          "help": "Horizontal padding inside Modern prompt pills.",
+          "valueOptions": { "min": 0.0, "max": 32.0, "step": 1.0, "sourceType": "ModSettingFloat" }
+        },
+        {
+          "type": "slider",
+          "id": "fModernPadY:Visual",
+          "text": "Modern Vertical Padding",
+          "help": "Vertical padding inside Modern prompt pills.",
+          "valueOptions": { "min": 0.0, "max": 24.0, "step": 1.0, "sourceType": "ModSettingFloat" }
+        },
+        {
+          "type": "slider",
+          "id": "fModernItemGap:Visual",
+          "text": "Modern Element Spacing",
+          "help": "Horizontal spacing between button badge, icon, and text.",
+          "valueOptions": { "min": 2.0, "max": 24.0, "step": 1.0, "sourceType": "ModSettingFloat" }
+        },
+        { "type": "section", "text": "Inline Info Summary" },
+        {
+          "type": "switcher",
+          "id": "bInlineItemInfo:Visual",
+          "text": "Compact Inline Info Line",
+          "help": "Render a compact summary line attached below the prompt. Keep off if you prefer info only in the Mini Info Card.",
+          "valueOptions": { "sourceType": "ModSettingBool" }
+        }
+      ]
+    },
+    {
+      "pageDisplayName": "Info Card",
+      "content": [
+        { "type": "section", "text": "Smooth Mini Info Card" },
+        {
+          "type": "stepper",
+          "id": "iInfoCardPosition:InfoCard",
+          "text": "Mini Card Position",
+          "help": "Where the built-in smooth Info Card anchors (replaces More HUD Info with zero jitter).",
+          "valueOptions": {
+            "sourceType": "ModSettingInt",
+            "options": ["Off", "Below Prompt", "Above Prompt", "Right of Prompt", "Left of Prompt", "Fixed Top-Right", "Fixed Bottom-Right"]
+          }
+        },
+        {
+          "type": "slider",
+          "id": "fInfoCardDelaySeconds:InfoCard",
+          "text": "Hover Reveal Delay (sec)",
+          "help": "Seconds the target must remain aimed at before smoothly fading in the Mini Info Card (0 = instant).",
+          "valueOptions": { "min": 0.0, "max": 5.0, "step": 0.1, "sourceType": "ModSettingFloat" }
+        },
+        {
+          "type": "slider",
+          "id": "fInfoCardOffsetX:InfoCard",
+          "text": "Card Offset X (px)",
+          "help": "Horizontal pixel offset applied to the Mini Info Card.",
+          "valueOptions": { "min": -400, "max": 400, "step": 2, "sourceType": "ModSettingFloat" }
+        },
+        {
+          "type": "slider",
+          "id": "fInfoCardOffsetY:InfoCard",
+          "text": "Card Offset Y (px)",
+          "help": "Vertical pixel offset applied to the Mini Info Card.",
+          "valueOptions": { "min": -400, "max": 400, "step": 2, "sourceType": "ModSettingFloat" }
+        },
+        {
+          "type": "slider",
+          "id": "fInfoCardScale:InfoCard",
+          "text": "Card Scale",
+          "help": "Scale multiplier for the Mini Info Card.",
+          "valueOptions": { "min": 0.5, "max": 2.5, "step": 0.05, "sourceType": "ModSettingFloat" }
+        },
+        {
+          "type": "slider",
+          "id": "fInfoCardOpacity:InfoCard",
+          "text": "Card Overall Opacity",
+          "help": "Overall opacity of the Mini Info Card text and elements.",
+          "valueOptions": { "min": 0.1, "max": 1.0, "step": 0.05, "sourceType": "ModSettingFloat" }
+        },
+        { "type": "section", "text": "Card Style & Geometry (Colors via F1 Menu)" },
+        {
+          "type": "slider",
+          "id": "fInfoCardBgOpacity:InfoCard",
+          "text": "Card Background Opacity",
+          "help": "Background opacity of the Mini Info Card (0.0 for transparent).",
+          "valueOptions": { "min": 0.0, "max": 1.0, "step": 0.05, "sourceType": "ModSettingFloat" }
+        },
+        {
+          "type": "switcher",
+          "id": "bInfoCardBorder:InfoCard",
+          "text": "Show Card Border",
+          "help": "Draw a 1px border around the Mini Info Card.",
+          "valueOptions": { "sourceType": "ModSettingBool" }
+        },
+        {
+          "type": "switcher",
+          "id": "bInfoCardAccentBar:InfoCard",
+          "text": "Show Top Accent Bar",
+          "help": "Draw a colored accent strip along the top edge of the Mini Info Card.",
+          "valueOptions": { "sourceType": "ModSettingBool" }
+        },
+        {
+          "type": "switcher",
+          "id": "bInfoCardShowIcon:InfoCard",
+          "text": "Show Card Header Icon",
+          "help": "Display the category icon in the Mini Info Card header.",
+          "valueOptions": { "sourceType": "ModSettingBool" }
+        },
+        {
+          "type": "slider",
+          "id": "fInfoCardRounding:InfoCard",
+          "text": "Card Corner Rounding",
+          "help": "Corner radius in pixels for the Mini Info Card.",
+          "valueOptions": { "min": 0.0, "max": 24.0, "step": 1.0, "sourceType": "ModSettingFloat" }
+        },
+        {
+          "type": "slider",
+          "id": "fInfoCardPad:InfoCard",
+          "text": "Card Inner Padding",
+          "help": "Inner padding in pixels inside the Mini Info Card.",
+          "valueOptions": { "min": 2.0, "max": 28.0, "step": 1.0, "sourceType": "ModSettingFloat" }
+        },
+        {
+          "type": "slider",
+          "id": "fInfoCardRowGap:InfoCard",
+          "text": "Card Row Spacing",
+          "help": "Vertical gap between detail rows in the Mini Info Card.",
+          "valueOptions": { "min": 0.0, "max": 16.0, "step": 1.0, "sourceType": "ModSettingFloat" }
+        },
+        { "type": "section", "text": "Card Contents" },
+        {
+          "type": "switcher",
+          "id": "bShowScrapComponents:InfoCard",
+          "text": "Show Scrap Components",
+          "help": "Show scrap materials yielded when salvaging junk items.",
+          "valueOptions": { "sourceType": "ModSettingBool" }
+        },
+        {
+          "type": "switcher",
+          "id": "bShowItemValueWeight:InfoCard",
+          "text": "Show Value & Weight",
+          "help": "Show Value, Weight, and Value/Weight ratio for loose items.",
+          "valueOptions": { "sourceType": "ModSettingBool" }
+        },
+        {
+          "type": "switcher",
+          "id": "bShowWeaponArmorStats:InfoCard",
+          "text": "Show Weapon & Armor Stats",
+          "help": "Show Damage/Ammo for weapons and Armor Rating for armor.",
+          "valueOptions": { "sourceType": "ModSettingBool" }
+        },
+        {
+          "type": "switcher",
+          "id": "bShowNpcStats:InfoCard",
+          "text": "Show NPC Stats",
+          "help": "Show equipped weapon, HP, AP, DR, and ER when targeting NPCs.",
+          "valueOptions": { "sourceType": "ModSettingBool" }
+        },
+        {
+          "type": "switcher",
+          "id": "bInfoCardInQuickContainer:InfoCard",
+          "text": "Show Mini Info Card inside Modern QuickLoot",
+          "help": "Display item details (Scrap, Damage, Armor, Weight, Value) for the selected item inside the Modern QuickLoot menu.",
+          "valueOptions": { "sourceType": "ModSettingBool" }
+        }
+      ]
+    },
+    {
+      "pageDisplayName": "QuickContainer",
+      "content": [
+        { "type": "section", "text": "Floating QuickContainer (FallUI / Loot Menu)" },
+        {
+          "type": "switcher",
+          "id": "bFloatQuickContainer:QuickContainer",
+          "text": "Float QuickContainer in 3D",
+          "help": "Anchors container/corpse/workbench quick-loot panels cleanly to the object in 3D space.",
+          "valueOptions": { "sourceType": "ModSettingBool" }
+        },
+        {
+          "type": "switcher",
+          "id": "bModernQuickContainer:QuickContainer",
+          "text": "Use Modern Style for QuickContainer & Workbenches",
+          "help": "When Prompt Style is Modern, replace the native QuickContainer & Workbench panel with the Modern GTA-6 aesthetic.",
+          "valueOptions": { "sourceType": "ModSettingBool" }
+        },
+        {
+          "type": "slider",
+          "id": "fQuickContainerSmoothing:QuickContainer",
+          "text": "QuickContainer Smoothing",
+          "help": "Smoothing factor for the floating loot list.",
+          "valueOptions": { "min": 0.05, "max": 1.0, "step": 0.05, "sourceType": "ModSettingFloat" }
+        },
+        {
+          "type": "slider",
+          "id": "fQuickContainerDeadzone:QuickContainer",
+          "text": "Scroll Stability Deadzone (px)",
+          "help": "Minimum target pixel shift required before moving the loot list, preventing jitter while scrolling items.",
+          "valueOptions": { "min": 0, "max": 30, "step": 0.5, "sourceType": "ModSettingFloat" }
+        },
+        { "type": "slider", "id": "fQuickContainerOffsetX:QuickContainer", "text": "QuickContainer Offset X", "help": "Horizontal 3D world offset for floating QuickContainer.", "valueOptions": { "min": -100, "max": 100, "step": 1, "sourceType": "ModSettingFloat" } },
+        { "type": "slider", "id": "fQuickContainerOffsetY:QuickContainer", "text": "QuickContainer Offset Y", "help": "Depth 3D world offset for floating QuickContainer.", "valueOptions": { "min": -100, "max": 100, "step": 1, "sourceType": "ModSettingFloat" } },
+        { "type": "slider", "id": "fQuickContainerOffsetZ:QuickContainer", "text": "QuickContainer Offset Z", "help": "Vertical 3D world offset for floating QuickContainer.", "valueOptions": { "min": -100, "max": 100, "step": 1, "sourceType": "ModSettingFloat" } },
+        { "type": "section", "text": "Modern QuickLoot Window & Text Sizes (Fonts via F1 Menu)" },
+        {
+          "type": "slider",
+          "id": "fQcScale:QuickContainer",
+          "text": "QuickLoot Scale",
+          "help": "Overall scale multiplier for the Modern QuickLoot window.",
+          "valueOptions": { "min": 0.5, "max": 2.5, "step": 0.05, "sourceType": "ModSettingFloat" }
+        },
+        {
+          "type": "slider",
+          "id": "fQcWidth:QuickContainer",
+          "text": "QuickLoot Width (0 = Auto, px)",
+          "help": "Fixed window content width in pixels to stop resizing on long item names (0 = auto-size).",
+          "valueOptions": { "min": 0.0, "max": 600.0, "step": 5.0, "sourceType": "ModSettingFloat" }
+        },
+        {
+          "type": "switcher",
+          "id": "bQcExpandInventoryList:QuickContainer",
+          "text": "Expand List Beyond 5 Items",
+          "help": "When enabled, expands QuickLoot up to Max Visible Rows (3-12) using the container inventory. Turn off to use Fallout 4's native 5-slot engine window.",
+          "valueOptions": { "sourceType": "ModSettingBool" }
+        },
+        {
+          "type": "slider",
+          "id": "iQcMaxVisibleRows:QuickContainer",
+          "text": "Max Visible Rows",
+          "help": "Number of visible loot rows inside Modern QuickLoot.",
+          "valueOptions": { "min": 3, "max": 12, "step": 1, "sourceType": "ModSettingInt" }
+        },
+        {
+          "type": "slider",
+          "id": "fQcRowHeightPad:QuickContainer",
+          "text": "Row Height Padding (px)",
+          "help": "Vertical padding inside each item row.",
+          "valueOptions": { "min": 0.0, "max": 20.0, "step": 1.0, "sourceType": "ModSettingFloat" }
+        },
+        {
+          "type": "slider",
+          "id": "fQcHeaderTextScale:QuickContainer",
+          "text": "Header Text Size",
+          "help": "Font scale multiplier for the container title.",
+          "valueOptions": { "min": 0.5, "max": 2.5, "step": 0.05, "sourceType": "ModSettingFloat" }
+        },
+        {
+          "type": "slider",
+          "id": "fQcItemTextScale:QuickContainer",
+          "text": "Item List Text Size",
+          "help": "Font scale multiplier for loot item rows.",
+          "valueOptions": { "min": 0.5, "max": 2.5, "step": 0.05, "sourceType": "ModSettingFloat" }
+        },
+        {
+          "type": "slider",
+          "id": "fQcButtonSize:QuickContainer",
+          "text": "QuickLoot Button Size",
+          "help": "Size multiplier for button badges inside QuickLoot & Workbenches.",
+          "valueOptions": { "min": 0.5, "max": 2.5, "step": 0.05, "sourceType": "ModSettingFloat" }
+        },
+        {
+          "type": "slider",
+          "id": "fQcKeyTextScale:QuickContainer",
+          "text": "QuickLoot Key Text Size",
+          "help": "Relative font size of key letters inside QuickLoot buttons.",
+          "valueOptions": { "min": 0.40, "max": 1.20, "step": 0.02, "sourceType": "ModSettingFloat" }
+        },
+        {
+          "type": "slider",
+          "id": "fQcButtonTextScale:QuickContainer",
+          "text": "QuickLoot Action Label Size",
+          "help": "Font scale multiplier for button action labels (TAKE / TRANSFER / CRAFT).",
+          "valueOptions": { "min": 0.5, "max": 2.5, "step": 0.05, "sourceType": "ModSettingFloat" }
+        },
+        {
+          "type": "switcher",
+          "id": "bQcShowItemIcons:QuickContainer",
+          "text": "Show Item Category Icons",
+          "help": "Display category icons next to loot items inside the Modern QuickLoot list.",
+          "valueOptions": { "sourceType": "ModSettingBool" }
+        }
+      ]
+    }
+  ]
+}

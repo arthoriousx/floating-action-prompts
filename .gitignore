@@ -1,0 +1,8 @@
+build/
+.vs/
+external/
+Docs/
+.superpowers/
+F4SE/Plugins/*.dll
+*.user
+*.log

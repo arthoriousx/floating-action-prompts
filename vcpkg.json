@@ -1,0 +1,12 @@
+{
+  "name": "floating-action-prompts",
+  "version-string": "1.0.0",
+  "dependencies": [
+    "boost-stl-interfaces",
+    "fmt",
+    "rsm-mmio",
+    "spdlog",
+    "zydis"
+  ],
+  "builtin-baseline": "93ad765c7b66ab9ce97469ec23a90b15c3a14ee5"
+}
