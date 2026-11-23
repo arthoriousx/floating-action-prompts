@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: Build Standalone Tests & Validate Config
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure CMake (Unit Tests Only)
+        run: cmake -B build-ci -S . -DFAP_BUILD_PLUGIN=OFF -A x64
+
+      - name: Build Unit Tests (Release)
+        run: cmake --build build-ci --config Release --parallel
+
+      - name: Run CTest
+        run: ctest --test-dir build-ci -C Release --output-on-failure
+
+      - name: Validate MCM Config JSON and Default INI Sync
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $null = Get-Content -Raw 'MCM/Config/FloatingActionPrompts/config.json' | ConvertFrom-Json
+          $pluginIni = Get-Content 'F4SE/Plugins/FloatingActionPrompts.ini'
+          $mcmIni = Get-Content 'MCM/Config/FloatingActionPrompts/settings.ini'
+          $diff = Compare-Object $pluginIni $mcmIni
+          if ($diff) {
+            Write-Error "Default INI mismatch between F4SE/Plugins/FloatingActionPrompts.ini and MCM/Config/FloatingActionPrompts/settings.ini"
+          }

@@ -1,14 +1,19 @@
 cmake_minimum_required(VERSION 3.21)
 
-if (NOT DEFINED CMAKE_TOOLCHAIN_FILE)
-    if (DEFINED ENV{VCPKG_ROOT} AND EXISTS "$ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake")
-        set(CMAKE_TOOLCHAIN_FILE "$ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" CACHE STRING "")
-    elseif (EXISTS "C:/Program Files/Microsoft Visual Studio/18/Community/VC/vcpkg/scripts/buildsystems/vcpkg.cmake")
-        set(CMAKE_TOOLCHAIN_FILE "C:/Program Files/Microsoft Visual Studio/18/Community/VC/vcpkg/scripts/buildsystems/vcpkg.cmake" CACHE STRING "")
+option(FAP_BUILD_PLUGIN "Build the F4SE plugin DLL (requires CommonLibF4RD, F4SEMenuFrameworkExample, and vcpkg)" ON)
+
+if (FAP_BUILD_PLUGIN)
+    if (NOT DEFINED CMAKE_TOOLCHAIN_FILE)
+        if (DEFINED ENV{VCPKG_ROOT} AND EXISTS "$ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake")
+            set(CMAKE_TOOLCHAIN_FILE "$ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" CACHE STRING "")
+        elseif (EXISTS "C:/Program Files/Microsoft Visual Studio/18/Community/VC/vcpkg/scripts/buildsystems/vcpkg.cmake")
+            set(CMAKE_TOOLCHAIN_FILE "C:/Program Files/Microsoft Visual Studio/18/Community/VC/vcpkg/scripts/buildsystems/vcpkg.cmake" CACHE STRING "")
+        endif()
     endif()
+
+    set(VCPKG_TARGET_TRIPLET "x64-windows-static-md" CACHE STRING "")
 endif()
 
-set(VCPKG_TARGET_TRIPLET "x64-windows-static-md" CACHE STRING "")
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL" CACHE STRING "")
 
 project(FloatingActionPrompts VERSION 1.0.0 LANGUAGES CXX)
@@ -21,43 +26,45 @@ if (MSVC)
 endif()
 
 # ---- Dependencies ----
-if (NOT TARGET CommonLibF4)
-    add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/external/CommonLibF4RD/CommonLibF4" CommonLibF4)
+if (FAP_BUILD_PLUGIN)
+    if (NOT TARGET CommonLibF4)
+        add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/external/CommonLibF4RD/CommonLibF4" CommonLibF4)
+    endif()
+
+    find_package(fmt CONFIG REQUIRED)
+    find_package(spdlog CONFIG REQUIRED)
+
+    # ---- Plugin Library ----
+    file(GLOB_RECURSE PLUGIN_SOURCES
+        "src/*.cpp"
+        "src/*.h"
+    )
+
+    add_library(${PROJECT_NAME} SHARED
+        ${PLUGIN_SOURCES}
+    )
+
+    target_include_directories(${PROJECT_NAME} PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/external/F4SEMenuFrameworkExample/include
+    )
+
+    target_precompile_headers(${PROJECT_NAME} PRIVATE src/PCH.h)
+
+    target_link_libraries(${PROJECT_NAME} PRIVATE
+        CommonLibF4::CommonLibF4
+        fmt::fmt
+        spdlog::spdlog
+    )
+
+    target_compile_definitions(${PROJECT_NAME} PRIVATE
+        _UNICODE
+        UNICODE
+        NOMINMAX
+        _CRT_SECURE_NO_WARNINGS
+        _SILENCE_CXX17_CODECVT_HEADER_DEPRECATION_WARNING
+    )
 endif()
-
-find_package(fmt CONFIG REQUIRED)
-find_package(spdlog CONFIG REQUIRED)
-
-# ---- Plugin Library ----
-file(GLOB_RECURSE PLUGIN_SOURCES
-    "src/*.cpp"
-    "src/*.h"
-)
-
-add_library(${PROJECT_NAME} SHARED
-    ${PLUGIN_SOURCES}
-)
-
-target_include_directories(${PROJECT_NAME} PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
-    ${CMAKE_CURRENT_SOURCE_DIR}/external/F4SEMenuFrameworkExample/include
-)
-
-target_precompile_headers(${PROJECT_NAME} PRIVATE src/PCH.h)
-
-target_link_libraries(${PROJECT_NAME} PRIVATE
-    CommonLibF4::CommonLibF4
-    fmt::fmt
-    spdlog::spdlog
-)
-
-target_compile_definitions(${PROJECT_NAME} PRIVATE
-    _UNICODE
-    UNICODE
-    NOMINMAX
-    _CRT_SECURE_NO_WARNINGS
-    _SILENCE_CXX17_CODECVT_HEADER_DEPRECATION_WARNING
-)
 
 # ---- Tests ----
 enable_testing()

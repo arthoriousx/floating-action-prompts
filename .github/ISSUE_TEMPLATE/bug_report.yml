@@ -1,0 +1,72 @@
+name: Bug Report
+description: Report a bug, crash, UI glitch, or unexpected HUD behavior in FAP - Floating Action Prompts.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting an issue! Please fill in the details below so we can reproduce and fix it.
+
+  - type: input
+    id: mod_version
+    attributes:
+      label: Mod Version
+      description: Version of FAP - Floating Action Prompts you are running.
+      placeholder: "e.g. 1.0.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: game_version
+    attributes:
+      label: Fallout 4 Version
+      options:
+        - "Next-Gen / Anniversary Edition (1.10.980+ / 1.11.x)"
+        - "Other (please specify below)"
+    validations:
+      required: true
+
+  - type: input
+    id: dependencies_versions
+    attributes:
+      label: F4SE & F4SE Menu Framework Versions
+      description: List your F4SE and F4SE Menu Framework versions, plus whether Address Library is installed.
+      placeholder: "e.g. F4SE 0.7.x, F4SE Menu Framework 1.53"
+    validations:
+      required: true
+
+  - type: input
+    id: ui_mods
+    attributes:
+      label: Installed HUD / UI / Loot Mods
+      description: List relevant UI mods (e.g. FallUI HUD, FallUI Icon Library, FIS, MCM, QuickLoot overrides, DEF_UI).
+      placeholder: "e.g. FallUI - Icon Library, FIS, MCM"
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: Describe what you were targeting or doing in-game when the issue occurred.
+      placeholder: |
+        1. Look at an Armor Workbench / container / door...
+        2. Enable Modern style with...
+        3. Observe prompt position / QuickLoot behavior...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected_actual
+    attributes:
+      label: Expected vs Actual Behavior
+      description: What did you expect to happen, and what happened instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs_and_ini
+    attributes:
+      label: Logs, Settings & Screenshots
+      description: |
+        Paste or attach `Documents/My Games/Fallout4/F4SE/FloatingActionPrompts.log` and `Data/MCM/Settings/FloatingActionPrompts.ini` (if present), plus any screenshots or crash logs.
+      render: text
