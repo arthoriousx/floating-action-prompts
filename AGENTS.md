@@ -82,6 +82,11 @@ Get-Content -Raw MCM\Config\FloatingActionPrompts\config.json | ConvertFrom-Json
 dumpbin /exports build\Release\FloatingActionPrompts.dll
 ```
 
+### Mandatory Post-Change Code Review
+
+- After every code change (bug fix, refactor, or feature), **always** dispatch an independent read-only code reviewer subagent (following the `requesting-code-review` workflow) to inspect `git diff HEAD` / branch range against the **Critical Invariants** above (thread boundaries, `FAP_UNIT_TEST` isolation, INI/MCM sync, runtime safety), C++20/F4SE edge cases, and unit test coverage.
+- Fix all **Critical** and **Important** findings before deploying the DLL, committing, or merging, then re-run the Release build and `ctest` suite.
+
 ## Repository Hygiene
 
 - Never commit compiled binaries (`F4SE/Plugins/*.dll`, `build/`), third-party clones (`external/`), logs (`*.log`), or local planning notes (`Docs/`).

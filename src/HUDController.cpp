@@ -55,9 +55,7 @@ namespace HUDController
                 _isFloating = false;
                 const bool restoreAlpha = _modifiedAlpha;
                 _modifiedAlpha = false;
-                if (a_in.inPowerArmor && a_in.powerArmorBypass) {
-                    _hasBaseline = false;
-                }
+                _hasBaseline = false;
                 return {
                     HUDAction::kRestoreBaseline,
                     _baseX,
@@ -65,6 +63,20 @@ namespace HUDController
                     1.0f,
                     true,
                     restoreAlpha
+                };
+            }
+
+            if (_modifiedAlpha) {
+                _modifiedAlpha = false;
+                const bool restorePos = _hasBaseline;
+                _hasBaseline = false;
+                return {
+                    HUDAction::kRestoreBaseline,
+                    _baseX,
+                    _baseY,
+                    1.0f,
+                    restorePos,
+                    true
                 };
             }
 
@@ -76,6 +88,9 @@ namespace HUDController
 
         const bool targetActive = a_in.rolloverVisible && a_in.hasTarget;
         if (!targetActive) {
+            const bool keepSuppressed =
+                a_in.hideNativeClip && (a_in.nativeClipVisible || a_in.rolloverVisible);
+
             if (_isFloating && _hasBaseline) {
                 if (++_lossFrames <= kLossGraceFrames) {
                     return {};
@@ -84,9 +99,22 @@ namespace HUDController
                 _lossFrames = 0;
                 _hasPrevScreen = false;
                 _hasAnchorTarget = false;
+                if (keepSuppressed) {
+                    _modifiedAlpha = true;
+                    _hidingAlpha = true;
+                    return {
+                        HUDAction::kSuppressNative,
+                        0.0f,
+                        0.0f,
+                        0.0f,
+                        false,
+                        true
+                    };
+                }
                 _hidingAlpha = false;
                 const bool restoreAlpha = _modifiedAlpha;
                 _modifiedAlpha = false;
+                _hasBaseline = false;
                 return {
                     HUDAction::kRestoreBaseline,
                     _baseX,
@@ -100,19 +128,46 @@ namespace HUDController
             _lossFrames = 0;
             _hasPrevScreen = false;
             _hasAnchorTarget = false;
+            if (keepSuppressed) {
+                _modifiedAlpha = true;
+                _hidingAlpha = true;
+                return {
+                    HUDAction::kSuppressNative,
+                    0.0f,
+                    0.0f,
+                    0.0f,
+                    false,
+                    true
+                };
+            }
+            if (_modifiedAlpha) {
+                _modifiedAlpha = false;
+                _hidingAlpha = false;
+                const bool restorePos = _hasBaseline;
+                _hasBaseline = false;
+                return {
+                    HUDAction::kRestoreBaseline,
+                    _baseX,
+                    _baseY,
+                    1.0f,
+                    restorePos,
+                    true
+                };
+            }
             _hidingAlpha = false;
             return {};
         }
 
         _lossFrames = 0;
         if (!_isFloating) {
-            _baseX = a_in.currentClipX;
-            _baseY = a_in.currentClipY;
-            _hasBaseline = true;
+            if (!_hasBaseline) {
+                _baseX = a_in.currentClipX;
+                _baseY = a_in.currentClipY;
+                _hasBaseline = true;
+            }
             _isFloating = true;
             _hasPrevScreen = false;
             _hasAnchorTarget = false;
-            _modifiedAlpha = false;
             _hidingAlpha = false;
         }
 
@@ -264,6 +319,27 @@ namespace HUDController
                 return (a_lhs.count == a_rhs.count) ? 3 : 1;
             }
             return 0;
+        }
+
+        void EnrichWindowKindsFromMap(
+            std::vector<QuickContainerItemEntry>& a_items,
+            const std::unordered_map<std::string, TargetInfo::ItemKind>& a_kindMap)
+        {
+            if (a_kindMap.empty()) {
+                return;
+            }
+            for (auto& item : a_items) {
+                if (item.itemKind != TargetInfo::ItemKind::None) {
+                    continue;
+                }
+                const std::string key = CleanUpperKey(item.name);
+                if (key.empty()) {
+                    continue;
+                }
+                if (const auto it = a_kindMap.find(key); it != a_kindMap.end()) {
+                    item.itemKind = it->second;
+                }
+            }
         }
     }
 
@@ -433,10 +509,12 @@ namespace HUDController
         const std::size_t nInv = a_inventoryItems.size();
         const std::size_t winLen = realEngine.size();
 
-        // Build 5 lightweight index orderings with zero string copies in comparators:
+        // Build lightweight index orderings with zero string copies in comparators:
         // 0 = forward BGSInventoryList, 1 = reversed, 2 = case-insensitive raw (with [FIS] tags),
-        // 3 = case-sensitive raw, 4 = tag-stripped case-insensitive
-        std::array<std::vector<std::size_t>, 5> orderCandidates;
+        // 3 = case-sensitive raw, 4 = tag-stripped case-insensitive,
+        // 5 = Value DESC (raw tiebreak), 6 = Value DESC (clean tiebreak), 7 = Stack Value (value*count) DESC,
+        // 8 = Category ASC + Value DESC, 9 = Value/Weight DESC, 10 = Weight DESC
+        std::array<std::vector<std::size_t>, 11> orderCandidates;
         orderCandidates[0].resize(nInv);
         for (std::size_t k = 0; k < nInv; ++k) {
             orderCandidates[0][k] = k;
@@ -457,6 +535,115 @@ namespace HUDController
             [&invCleanUpper](std::size_t a, std::size_t b) {
                 return invCleanUpper[a] < invCleanUpper[b];
             });
+
+        bool hasValueOrWeight = false;
+        for (const auto& inv : a_inventoryItems) {
+            if (inv.value > 0 || inv.weight > 0.0f) {
+                hasValueOrWeight = true;
+                break;
+            }
+        }
+        if (hasValueOrWeight) {
+            auto categoryRank = [](TargetInfo::ItemKind a_kind) -> int {
+                switch (a_kind) {
+                case TargetInfo::ItemKind::Key:
+                    return 0;
+                case TargetInfo::ItemKind::Weapon:
+                    return 1;
+                case TargetInfo::ItemKind::Armor:
+                    return 2;
+                case TargetInfo::ItemKind::Aid:
+                    return 3;
+                case TargetInfo::ItemKind::Ammo:
+                    return 4;
+                case TargetInfo::ItemKind::BookNote:
+                    return 5;
+                case TargetInfo::ItemKind::Holotape:
+                    return 6;
+                case TargetInfo::ItemKind::MiscJunk:
+                    return 7;
+                default:
+                    return 8;
+                }
+            };
+            auto valuePerWeightRank = [](const QuickContainerItemEntry& a_e) -> float {
+                if (a_e.value == 0) {
+                    return 0.0f;
+                }
+                const float w = (std::isfinite(a_e.weight) && a_e.weight > 0.0f) ? a_e.weight : 0.0f;
+                if (w <= 0.001f) {
+                    return 1.0e12f + static_cast<float>(a_e.value);
+                }
+                return static_cast<float>(a_e.value) / w;
+            };
+
+            orderCandidates[5] = orderCandidates[0];
+            std::stable_sort(orderCandidates[5].begin(), orderCandidates[5].end(),
+                [&a_inventoryItems, &invRawUpper](std::size_t a, std::size_t b) {
+                    if (a_inventoryItems[a].value != a_inventoryItems[b].value) {
+                        return a_inventoryItems[a].value > a_inventoryItems[b].value;
+                    }
+                    return invRawUpper[a] < invRawUpper[b];
+                });
+            orderCandidates[6] = orderCandidates[0];
+            std::stable_sort(orderCandidates[6].begin(), orderCandidates[6].end(),
+                [&a_inventoryItems, &invCleanUpper](std::size_t a, std::size_t b) {
+                    if (a_inventoryItems[a].value != a_inventoryItems[b].value) {
+                        return a_inventoryItems[a].value > a_inventoryItems[b].value;
+                    }
+                    return invCleanUpper[a] < invCleanUpper[b];
+                });
+            orderCandidates[7] = orderCandidates[0];
+            std::stable_sort(orderCandidates[7].begin(), orderCandidates[7].end(),
+                [&a_inventoryItems, &invRawUpper](std::size_t a, std::size_t b) {
+                    const std::uint64_t va =
+                        static_cast<std::uint64_t>(a_inventoryItems[a].value) * a_inventoryItems[a].count;
+                    const std::uint64_t vb =
+                        static_cast<std::uint64_t>(a_inventoryItems[b].value) * a_inventoryItems[b].count;
+                    if (va != vb) {
+                        return va > vb;
+                    }
+                    return invRawUpper[a] < invRawUpper[b];
+                });
+            orderCandidates[8] = orderCandidates[0];
+            std::stable_sort(orderCandidates[8].begin(), orderCandidates[8].end(),
+                [&a_inventoryItems, &invRawUpper, &categoryRank](std::size_t a, std::size_t b) {
+                    const int ra = categoryRank(a_inventoryItems[a].itemKind);
+                    const int rb = categoryRank(a_inventoryItems[b].itemKind);
+                    if (ra != rb) {
+                        return ra < rb;
+                    }
+                    if (a_inventoryItems[a].value != a_inventoryItems[b].value) {
+                        return a_inventoryItems[a].value > a_inventoryItems[b].value;
+                    }
+                    return invRawUpper[a] < invRawUpper[b];
+                });
+            orderCandidates[9] = orderCandidates[0];
+            std::stable_sort(orderCandidates[9].begin(), orderCandidates[9].end(),
+                [&a_inventoryItems, &invRawUpper, &valuePerWeightRank](std::size_t a, std::size_t b) {
+                    const float ra = valuePerWeightRank(a_inventoryItems[a]);
+                    const float rb = valuePerWeightRank(a_inventoryItems[b]);
+                    if (ra != rb) {
+                        return ra > rb;
+                    }
+                    if (a_inventoryItems[a].value != a_inventoryItems[b].value) {
+                        return a_inventoryItems[a].value > a_inventoryItems[b].value;
+                    }
+                    return invRawUpper[a] < invRawUpper[b];
+                });
+            orderCandidates[10] = orderCandidates[0];
+            std::stable_sort(orderCandidates[10].begin(), orderCandidates[10].end(),
+                [&a_inventoryItems, &invRawUpper](std::size_t a, std::size_t b) {
+                    const float rawA = a_inventoryItems[a].weight;
+                    const float rawB = a_inventoryItems[b].weight;
+                    const float wa = (std::isfinite(rawA) && rawA > 0.0f) ? rawA : 0.0f;
+                    const float wb = (std::isfinite(rawB) && rawB > 0.0f) ? rawB : 0.0f;
+                    if (wa != wb) {
+                        return wa > wb;
+                    }
+                    return invRawUpper[a] < invRawUpper[b];
+                });
+        }
 
         // Boundary enforcement tailored to vanilla FO4 (which omits leading "..." mid-scroll and omits
         // all "..." on the 5-item bottom window) as well as dual-ellipsis UI mods.
@@ -492,8 +679,11 @@ namespace HUDController
         std::size_t bestStart = 0;
         int bestCandScore = std::numeric_limits<int>::min();
 
-        for (int c = 0; c < 5; ++c) {
+        for (int c = 0; c < static_cast<int>(orderCandidates.size()); ++c) {
             const auto& idxs = orderCandidates[static_cast<std::size_t>(c)];
+            if (idxs.size() != nInv) {
+                continue;
+            }
             for (std::size_t start = startMin; start <= startMax; ++start) {
                 int totalScore = 0;
                 bool allMatch = true;
@@ -519,6 +709,11 @@ namespace HUDController
                 }
                 if (c == a_preferredOrder) {
                     totalScore += 60;
+                }
+                // Deterministic sorted orderings beat raw/reversed BGSInventoryList on prefix ties
+                // (e.g. first 4 items matching both before swap-and-popped entries leak into row 4+)
+                if (c >= 2) {
+                    totalScore += 2;
                 }
                 if (a_prevStart >= 0) {
                     const int dist = std::abs(static_cast<int>(start) - a_prevStart);
@@ -587,6 +782,128 @@ namespace HUDController
         return out;
     }
 
+    const QuickContainerMergeResult& ResolveMergedQuickContainerWindow(
+        QuickContainerMergeCache& a_cache,
+        std::uint32_t a_ownerFormID,
+        const CachedInventorySnapshot& a_invSnap,
+        const std::vector<QuickContainerItemEntry>& a_rawWindow,
+        std::int32_t a_rawSel,
+        int a_maxRows,
+        bool a_expandEnabled)
+    {
+        if (a_ownerFormID == 0 || a_ownerFormID != a_cache.stickyOwnerFormID) {
+            a_cache.stickyOwnerFormID = a_ownerFormID;
+            a_cache.stickyInvGen = a_invSnap.generation;
+            a_cache.lockedOrderIndex = -1;
+            a_cache.lastMatchedStart = -1;
+            a_cache.stickyFallback = false;
+            a_cache.everExpanded = false;
+            a_cache.consecutiveMisses = 0;
+        } else if (a_invSnap.generation != a_cache.stickyInvGen) {
+            a_cache.stickyInvGen = a_invSnap.generation;
+            a_cache.stickyFallback = false;
+            a_cache.consecutiveMisses = 0;
+            if (a_cache.lastMatchedStart >= 0 && !a_invSnap.items.empty()) {
+                a_cache.lastMatchedStart = std::min<std::int32_t>(
+                    a_cache.lastMatchedStart,
+                    static_cast<std::int32_t>(a_invSnap.items.size() - 1));
+            } else {
+                a_cache.lastMatchedStart = -1;
+            }
+        }
+
+        std::size_t rawHash = std::hash<std::size_t>{}(a_rawWindow.size());
+        bool windowHasEllipsis = false;
+        std::size_t realCount = 0;
+        for (const auto& it : a_rawWindow) {
+            if (IsEllipsisItem(it)) {
+                windowHasEllipsis = true;
+            } else {
+                ++realCount;
+            }
+            rawHash ^= std::hash<std::string>{}(it.name) + 0x9e3779b9u + (rawHash << 6) + (rawHash >> 2);
+            rawHash ^= std::hash<std::uint32_t>{}(it.count) + 0x9e3779b9u + (rawHash << 6) + (rawHash >> 2);
+            rawHash ^= std::hash<bool>{}(it.isEquipped) + 0x9e3779b9u;
+        }
+
+        if (a_ownerFormID != 0 &&
+            a_ownerFormID == a_cache.ownerFormID &&
+            a_invSnap.generation == a_cache.invGeneration &&
+            rawHash == a_cache.rawWindowHash &&
+            a_rawSel == a_cache.rawSel &&
+            a_maxRows == a_cache.maxRows &&
+            a_expandEnabled == a_cache.expandEnabled &&
+            (a_cache.consecutiveMisses == 0 || a_cache.consecutiveMisses > 6 || a_cache.stickyFallback)) {
+            return a_cache.result;
+        }
+
+        QuickContainerMergeResult res;
+        if (!a_expandEnabled) {
+            res = MergeQuickContainerInventory(a_rawWindow, a_rawSel, {}, 5);
+            EnrichWindowKindsFromMap(res.windowItems, a_invSnap.kindByCleanUpper);
+            a_cache.consecutiveMisses = 0;
+        } else {
+            const bool skipExpansion = a_invSnap.truncatedByCap || a_cache.stickyFallback;
+            res = skipExpansion
+                ? MergeQuickContainerInventory(a_rawWindow, a_rawSel, {}, a_maxRows)
+                : MergeQuickContainerInventory(
+                    a_rawWindow, a_rawSel, a_invSnap.items, a_maxRows,
+                    a_cache.lockedOrderIndex, a_cache.lastMatchedStart);
+
+            if (skipExpansion) {
+                EnrichWindowKindsFromMap(res.windowItems, a_invSnap.kindByCleanUpper);
+                a_cache.consecutiveMisses = 0;
+            } else if (res.expanded) {
+                a_cache.everExpanded = true;
+                a_cache.consecutiveMisses = 0;
+                a_cache.stickyFallback = false;
+                a_cache.lockedOrderIndex = res.matchedOrderIndex;
+                a_cache.lastMatchedStart = res.matchedStartIndex;
+            } else {
+                const bool hadPrevStart = (a_cache.lastMatchedStart >= 0);
+                const bool expansionEligible =
+                    !a_invSnap.items.empty() &&
+                    a_invSnap.items.size() > realCount &&
+                    (windowHasEllipsis || (realCount >= 5 && hadPrevStart));
+                if (a_cache.everExpanded) {
+                    ++a_cache.consecutiveMisses;
+                    if (a_cache.consecutiveMisses > 6) {
+                        a_cache.lastMatchedStart = -1;
+                    }
+                    if (a_cache.consecutiveMisses <= 2 &&
+                        a_cache.result.expanded &&
+                        a_cache.ownerFormID == a_ownerFormID &&
+                        a_cache.maxRows == a_maxRows &&
+                        a_cache.expandEnabled == a_expandEnabled &&
+                        a_invSnap.items.size() > realCount) {
+                        a_cache.invGeneration = a_invSnap.generation;
+                        a_cache.rawWindowHash = rawHash;
+                        a_cache.rawSel = a_rawSel;
+                        return a_cache.result;
+                    }
+                } else if (!expansionEligible) {
+                    a_cache.consecutiveMisses = 0;
+                    a_cache.lastMatchedStart = -1;
+                } else {
+                    ++a_cache.consecutiveMisses;
+                    a_cache.lastMatchedStart = -1;
+                    if (a_cache.consecutiveMisses >= 3) {
+                        a_cache.stickyFallback = true;
+                    }
+                }
+            }
+        }
+
+        a_cache.ownerFormID = a_ownerFormID;
+        a_cache.invGeneration = a_invSnap.generation;
+        a_cache.rawWindowHash = rawHash;
+        a_cache.rawSel = a_rawSel;
+        a_cache.maxRows = a_maxRows;
+        a_cache.expandEnabled = a_expandEnabled;
+        a_cache.result = std::move(res);
+        return a_cache.result;
+    }
+
 #ifndef FAP_UNIT_TEST
     namespace
     {
@@ -596,12 +913,14 @@ namespace HUDController
             bool hasRollover{ false };
             RE::Scaleform::GFx::Value rolloverParent;
             RE::Scaleform::GFx::Value rollover;
+            bool rolloverRawVisible{ false };
 
             bool hasQuickContainer{ false };
             RE::Scaleform::GFx::Value qcParent;
             RE::Scaleform::GFx::Value quickContainer;
             bool qcParentIsRoot{ false };
             bool quickContainerVisible{ false };
+            bool quickContainerRawVisible{ false };
         };
 
         [[nodiscard]] bool TryReadNumber(const RE::Scaleform::GFx::Value& a_val, float& a_out) noexcept
@@ -642,6 +961,15 @@ namespace HUDController
                 return true;
             }
             return false;
+        }
+
+        [[nodiscard]] bool IsRawClipVisible(const RE::Scaleform::GFx::Value& a_clip)
+        {
+            if (!a_clip.IsObject()) {
+                return false;
+            }
+            RE::Scaleform::GFx::Value visVal;
+            return a_clip.GetMember("visible"sv, &visVal) && visVal.IsBoolean() && visVal.GetBoolean();
         }
 
         [[nodiscard]] bool IsClipVisible(const RE::Scaleform::GFx::Value& a_clip, bool a_ignoreAlpha)
@@ -690,6 +1018,7 @@ namespace HUDController
                     a_out.rolloverParent = a_container;
                     a_out.rollover = rollover;
                     a_out.hasRollover = true;
+                    a_out.rolloverRawVisible = IsRawClipVisible(rollover);
                 }
             }
 
@@ -700,6 +1029,7 @@ namespace HUDController
                     a_out.quickContainer = qc;
                     a_out.hasQuickContainer = true;
                     a_out.qcParentIsRoot = a_isRootContainer;
+                    a_out.quickContainerRawVisible = IsRawClipVisible(qc);
                     a_out.quickContainerVisible = IsClipVisible(qc, a_ignoreQcAlpha);
                 }
             }
@@ -1268,7 +1598,10 @@ namespace HUDController
         void TryReadEngineQuickContainerState(
             EngineQuickContainerSnapshot& a_out,
             RE::TESObjectREFR* a_targetRef,
-            bool a_requireMatchingTarget = false)
+            bool a_requireMatchingTarget = false,
+            std::string_view a_sfHeader = {},
+            std::string_view a_sfFirstItem = {},
+            bool a_allowContentMatch = false)
         {
             a_out = {};
             auto* fm = RE::FavoritesManager::GetSingleton();
@@ -1285,25 +1618,64 @@ namespace HUDController
             const auto& qc = opt.value();
             auto contPtr = qc.containerRef.get();
             auto invPtr = qc.inventoryRef.get();
-            if (!contPtr && !invPtr) {
+
+            const bool exactMatch =
+                a_targetRef != nullptr &&
+                ((contPtr && contPtr.get() == a_targetRef) ||
+                 (invPtr && invPtr.get() == a_targetRef));
+            const bool linkedWorkbench =
+                a_targetRef != nullptr &&
+                !exactMatch &&
+                (qc.mode == RE::QuickContainerMode::kCrafting ||
+                 qc.mode == RE::QuickContainerMode::kWorkshop) &&
+                AnchorManager::ClassifyReference(a_targetRef) == AnchorManager::TargetCategory::kFurnitureTerminal;
+
+            bool contentMatch = false;
+            if (a_allowContentMatch && !exactMatch && !linkedWorkbench) {
+                const std::string_view engHeaderSv = qc.containerName.empty()
+                    ? std::string_view{}
+                    : std::string_view{ qc.containerName.c_str(), qc.containerName.size() };
+                const std::string engHeaderKey = CleanUpperKey(engHeaderSv);
+                const std::string sfHeaderKey = CleanUpperKey(a_sfHeader);
+                const bool headersBothPresent = !engHeaderKey.empty() && !sfHeaderKey.empty();
+                const bool headerExactMatch = headersBothPresent && (engHeaderKey == sfHeaderKey);
+                const bool headersCompatible =
+                    !headersBothPresent ||
+                    headerExactMatch ||
+                    (engHeaderKey.find(sfHeaderKey) != std::string::npos) ||
+                    (sfHeaderKey.find(engHeaderKey) != std::string::npos);
+
+                std::string_view engFirstItem;
+                for (const auto& it : qc.itemData) {
+                    if (!it.itemName.empty()) {
+                        const std::string_view sv{ it.itemName.c_str(), it.itemName.size() };
+                        if (sv != "..."sv && sv != "\xE2\x80\xA6"sv) {
+                            engFirstItem = sv;
+                            break;
+                        }
+                    }
+                }
+                const bool engHasItem = !engFirstItem.empty();
+                const bool sfHasItem = !a_sfFirstItem.empty();
+                if (engHasItem && sfHasItem) {
+                    contentMatch = DoItemNamesMatch(engFirstItem, a_sfFirstItem) && headersCompatible;
+                } else if (!engHasItem && !sfHasItem) {
+                    contentMatch = headerExactMatch;
+                } else {
+                    contentMatch = false;
+                }
+            }
+
+            if (!contPtr && !invPtr && !(contentMatch && !qc.itemData.empty())) {
                 return;
             }
+
             if (!a_targetRef) {
-                if (a_requireMatchingTarget) {
+                if (a_requireMatchingTarget && !contentMatch) {
                     return;
                 }
-            } else {
-                const bool exactMatch =
-                    (contPtr && contPtr.get() == a_targetRef) ||
-                    (invPtr && invPtr.get() == a_targetRef);
-                const bool linkedWorkbench =
-                    !exactMatch &&
-                    (qc.mode == RE::QuickContainerMode::kCrafting ||
-                     qc.mode == RE::QuickContainerMode::kWorkshop) &&
-                    AnchorManager::ClassifyReference(a_targetRef) == AnchorManager::TargetCategory::kFurnitureTerminal;
-                if (!exactMatch && !linkedWorkbench) {
-                    return;
-                }
+            } else if (!exactMatch && !linkedWorkbench && !contentMatch) {
+                return;
             }
 
             a_out.valid = true;
@@ -1376,6 +1748,107 @@ namespace HUDController
             return true;
         }
 
+        void TryReadScaleformQuickContainerIdentity(
+            const RE::Scaleform::GFx::Value& a_qcClip,
+            std::string& a_outHeader,
+            std::string& a_outFirstItem)
+        {
+            a_outHeader.clear();
+            a_outFirstItem.clear();
+
+            if (!a_qcClip.IsObject()) {
+                return;
+            }
+
+            if (!TryReadStringMember(a_qcClip, "containerName"sv, ""sv, a_outHeader)) {
+                RE::Scaleform::GFx::Value bracket;
+                RE::Scaleform::GFx::Value nameMc;
+                if (a_qcClip.GetMember("ListHeaderAndBracket_mc"sv, &bracket) && bracket.IsObject() &&
+                    bracket.GetMember("ContainerName_mc"sv, &nameMc) && nameMc.IsObject()) {
+                    (void)TryReadTextField(nameMc, "textField_tf"sv, a_outHeader);
+                }
+            }
+
+            auto tryAcceptIdentityItem = [&](std::string_view a_raw) -> bool {
+                std::string trimmed = TrimWhitespace(a_raw);
+                if (trimmed.empty() || trimmed == "(Item)"sv) {
+                    return false;
+                }
+                QuickContainerItemEntry probe;
+                probe.name = trimmed;
+                if (IsEllipsisItem(probe)) {
+                    return false;
+                }
+                a_outFirstItem = std::move(trimmed);
+                return true;
+            };
+
+            auto scanArrayFirstReal = [&](const RE::Scaleform::GFx::Value& a_arr) -> bool {
+                if (!a_arr.IsObject()) {
+                    return false;
+                }
+                RE::Scaleform::GFx::Value lenVal;
+                float lenFloat = 0.0f;
+                if (!a_arr.GetMember("length"sv, &lenVal) || !TryReadNumber(lenVal, lenFloat) ||
+                    !std::isfinite(lenFloat) || lenFloat < 0.5f) {
+                    return false;
+                }
+                const int n = static_cast<int>(std::clamp(lenFloat, 0.0f, 8.0f));
+                for (int i = 0; i < n; ++i) {
+                    const std::string k = std::to_string(i);
+                    RE::Scaleform::GFx::Value itemObj;
+                    std::string itemName;
+                    if (a_arr.GetMember(k.c_str(), &itemObj) && itemObj.IsObject() &&
+                        TryReadStringMember(itemObj, "text"sv, "itemName"sv, itemName) &&
+                        tryAcceptIdentityItem(itemName)) {
+                        return true;
+                    }
+                }
+                return false;
+            };
+
+            RE::Scaleform::GFx::Value arr;
+            if (a_qcClip.GetMember("ItemDataA"sv, &arr) && scanArrayFirstReal(arr)) {
+                return;
+            }
+
+            RE::Scaleform::GFx::Value listMc;
+            if (a_qcClip.GetMember("ListItems_mc"sv, &listMc) && listMc.IsObject() &&
+                listMc.GetMember("entryList"sv, &arr) && scanArrayFirstReal(arr)) {
+                return;
+            }
+
+            RE::Scaleform::GFx::Value clipsArr;
+            if (a_qcClip.GetMember("ItemClipsA"sv, &clipsArr) && clipsArr.IsObject()) {
+                RE::Scaleform::GFx::Value lenVal;
+                float lenFloat = 0.0f;
+                if (clipsArr.GetMember("length"sv, &lenVal) && TryReadNumber(lenVal, lenFloat) &&
+                    std::isfinite(lenFloat)) {
+                    const int nClips = static_cast<int>(std::clamp(lenFloat, 0.0f, 8.0f));
+                    for (int i = 0; i < nClips; ++i) {
+                        const std::string k = std::to_string(i);
+                        RE::Scaleform::GFx::Value clipObj;
+                        if (!clipsArr.GetMember(k.c_str(), &clipObj) || !clipObj.IsObject() ||
+                            !IsClipVisible(clipObj, false)) {
+                            continue;
+                        }
+                        RE::Scaleform::GFx::Value dataVal;
+                        std::string itemName;
+                        if (clipObj.GetMember("data"sv, &dataVal) && dataVal.IsObject() &&
+                            TryReadStringMember(dataVal, "text"sv, "itemName"sv, itemName) &&
+                            tryAcceptIdentityItem(itemName)) {
+                            return;
+                        }
+                        std::string tfName;
+                        if (TryReadTextField(clipObj, "ItemName_tf"sv, tfName) &&
+                            tryAcceptIdentityItem(tfName)) {
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+
         [[nodiscard]] std::uint64_t ComputeStackSignature(
             RE::ExtraDataList* a_extraList,
             std::uint32_t a_stackIdx,
@@ -1431,34 +1904,13 @@ namespace HUDController
             return sig;
         }
 
-        void EnrichWindowKindsFromMap(
-            std::vector<QuickContainerItemEntry>& a_items,
-            const std::unordered_map<std::string, TargetInfo::ItemKind>& a_kindMap)
-        {
-            if (a_kindMap.empty()) {
-                return;
-            }
-            for (auto& item : a_items) {
-                if (item.itemKind != TargetInfo::ItemKind::None) {
-                    continue;
-                }
-                const std::string key = CleanUpperKey(item.name);
-                if (key.empty()) {
-                    continue;
-                }
-                if (const auto it = a_kindMap.find(key); it != a_kindMap.end()) {
-                    item.itemKind = it->second;
-                }
-            }
-        }
-
         void ReadQuickContainerData(
             Controller& a_controller,
             std::uint32_t a_ownerFormID,
             const RE::Scaleform::GFx::Value& a_qcClip,
             const std::string& a_fallbackHeader,
             const EngineQuickContainerSnapshot& a_engineSnap,
-            const Controller::CachedInventorySnapshot& a_invSnap,
+            const CachedInventorySnapshot& a_invSnap,
             int a_maxVisibleRows,
             bool a_expandInventoryList,
             int a_prevSelectedIdx,
@@ -1509,7 +1961,9 @@ namespace HUDController
                         }
                         ++visibleClipsCount;
 
-                        bool isSel = TryReadBoolMember(clipObj, "selected"sv, "_selected"sv, false);
+                        bool isSel =
+                            TryReadBoolMember(clipObj, "selected"sv, "_selected"sv, false) ||
+                            TryReadBoolMember(clipObj, "Selected"sv, ""sv, false);
                         if (!isSel) {
                             RE::Scaleform::GFx::Value selInd;
                             if (clipObj.GetMember("SelectionIndicator_mc"sv, &selInd) && selInd.IsObject()) {
@@ -1630,7 +2084,10 @@ namespace HUDController
                           (hasListMc && TryReadPositiveIndex(listMc, "iSelectedIndex"sv, sfNumericSel)) ||
                           TryReadPositiveIndex(a_qcClip, "selectedIndex"sv, sfNumericSel) ||
                           TryReadPositiveIndex(a_qcClip, "_selectedIndex"sv, sfNumericSel) ||
-                          TryReadPositiveIndex(a_qcClip, "selectedClipIndex"sv, sfNumericSel))) {
+                          TryReadPositiveIndex(a_qcClip, "selectedClipIndex"sv, sfNumericSel) ||
+                          TryReadPositiveIndex(a_qcClip, "SelectedIndex"sv, sfNumericSel) ||
+                          TryReadPositiveIndex(a_qcClip, "SelectedClipIndex"sv, sfNumericSel) ||
+                          TryReadPositiveIndex(a_qcClip, "iSelectedClipIndex"sv, sfNumericSel))) {
                         sfNumericSel = -1;
                     }
 
@@ -1672,7 +2129,7 @@ namespace HUDController
                         }
                     } else if (activeClipExplicitIdx >= 0 && activeClipExplicitIdx < totalCount) {
                         rawSel = activeClipExplicitIdx;
-                    } else if (sfNumericSel >= 0) {
+                    } else if (sfNumericSel >= 0 && !(sfNumericSel == 0 && activeClipSlot > 0)) {
                         rawSel = sfNumericSel;
                     } else if (activeClipSlot >= 0) {
                         if (totalCount > visibleClipsCount && !activeClipText.empty()) {
@@ -2170,7 +2627,7 @@ namespace HUDController
         return foundMeta;
     }
 
-    const Controller::CachedInventorySnapshot& Controller::CollectQuickContainerInventory(
+    const CachedInventorySnapshot& Controller::CollectQuickContainerInventory(
         RE::TESObjectREFR* a_invOwner,
         bool a_skipEquipped)
     {
@@ -2306,6 +2763,11 @@ namespace HUDController
                     bool legendary = false;
                     const std::uint64_t stackSig = ComputeStackSignature(stackExtra, stackIdx, legendary);
 
+                    const std::int32_t rawValue = RE::TESValueForm::GetFormValue(invItem.object, instData);
+                    const std::uint32_t itemValue = (rawValue > 0) ? static_cast<std::uint32_t>(rawValue) : 0u;
+                    const float rawWeight = RE::TESWeightForm::GetFormWeight(invItem.object, instData);
+                    const float itemWeight = (std::isfinite(rawWeight) && rawWeight > 0.0f) ? rawWeight : 0.0f;
+
                     QuickContainerItemEntry entry;
                     entry.name = std::move(displayName);
                     entry.count = cnt;
@@ -2314,6 +2776,8 @@ namespace HUDController
                     entry.isEquipped = equipped;
                     entry.itemKind = kind;
                     entry.stackSignature = stackSig;
+                    entry.value = itemValue;
+                    entry.weight = itemWeight;
                     itemStacks.push_back(std::move(entry));
                 }
 
@@ -2341,84 +2805,14 @@ namespace HUDController
         int a_maxRows,
         bool a_expandEnabled)
     {
-        if (a_ownerFormID == 0 || a_ownerFormID != _cachedMerge.stickyOwnerFormID) {
-            _cachedMerge.stickyOwnerFormID = a_ownerFormID;
-            _cachedMerge.stickyInvGen = a_invSnap.generation;
-            _cachedMerge.lockedOrderIndex = -1;
-            _cachedMerge.lastMatchedStart = -1;
-            _cachedMerge.stickyFallback = false;
-        } else if (a_invSnap.generation != _cachedMerge.stickyInvGen) {
-            _cachedMerge.stickyInvGen = a_invSnap.generation;
-            _cachedMerge.lockedOrderIndex = -1;
-            if (_cachedMerge.lastMatchedStart >= 0 && !a_invSnap.items.empty()) {
-                _cachedMerge.lastMatchedStart = std::min<std::int32_t>(
-                    _cachedMerge.lastMatchedStart,
-                    static_cast<std::int32_t>(a_invSnap.items.size() - 1));
-            } else {
-                _cachedMerge.lastMatchedStart = -1;
-            }
-        }
-
-        std::size_t rawHash = std::hash<std::size_t>{}(a_rawWindow.size());
-        bool windowHasEllipsis = false;
-        std::size_t realCount = 0;
-        for (const auto& it : a_rawWindow) {
-            if (IsEllipsisItem(it)) {
-                windowHasEllipsis = true;
-            } else {
-                ++realCount;
-            }
-            rawHash ^= std::hash<std::string>{}(it.name) + 0x9e3779b9u + (rawHash << 6) + (rawHash >> 2);
-            rawHash ^= std::hash<std::uint32_t>{}(it.count) + 0x9e3779b9u + (rawHash << 6) + (rawHash >> 2);
-            rawHash ^= std::hash<bool>{}(it.isEquipped) + 0x9e3779b9u;
-        }
-
-        if (a_ownerFormID != 0 &&
-            a_ownerFormID == _cachedMerge.ownerFormID &&
-            a_invSnap.generation == _cachedMerge.invGeneration &&
-            rawHash == _cachedMerge.rawWindowHash &&
-            a_rawSel == _cachedMerge.rawSel &&
-            a_maxRows == _cachedMerge.maxRows &&
-            a_expandEnabled == _cachedMerge.expandEnabled) {
-            return _cachedMerge.result;
-        }
-
-        QuickContainerMergeResult res;
-        if (!a_expandEnabled) {
-            res = MergeQuickContainerInventory(a_rawWindow, a_rawSel, {}, 5);
-            EnrichWindowKindsFromMap(res.windowItems, a_invSnap.kindByCleanUpper);
-        } else {
-            const bool skipExpansion = a_invSnap.truncatedByCap || _cachedMerge.stickyFallback;
-            res = skipExpansion
-                ? MergeQuickContainerInventory(a_rawWindow, a_rawSel, {}, a_maxRows)
-                : MergeQuickContainerInventory(
-                    a_rawWindow, a_rawSel, a_invSnap.items, a_maxRows,
-                    _cachedMerge.lockedOrderIndex, _cachedMerge.lastMatchedStart);
-
-            if (skipExpansion) {
-                EnrichWindowKindsFromMap(res.windowItems, a_invSnap.kindByCleanUpper);
-            } else if (res.expanded) {
-                _cachedMerge.lockedOrderIndex = res.matchedOrderIndex;
-                _cachedMerge.lastMatchedStart = res.matchedStartIndex;
-            } else {
-                const bool hadPrevStart = (_cachedMerge.lastMatchedStart >= 0);
-                _cachedMerge.lastMatchedStart = -1;
-                if (!a_invSnap.items.empty() &&
-                    a_invSnap.items.size() > realCount &&
-                    (windowHasEllipsis || (realCount >= 5 && hadPrevStart))) {
-                    _cachedMerge.stickyFallback = true;
-                }
-            }
-        }
-
-        _cachedMerge.ownerFormID = a_ownerFormID;
-        _cachedMerge.invGeneration = a_invSnap.generation;
-        _cachedMerge.rawWindowHash = rawHash;
-        _cachedMerge.rawSel = a_rawSel;
-        _cachedMerge.maxRows = a_maxRows;
-        _cachedMerge.expandEnabled = a_expandEnabled;
-        _cachedMerge.result = std::move(res);
-        return _cachedMerge.result;
+        return HUDController::ResolveMergedQuickContainerWindow(
+            _cachedMerge,
+            a_ownerFormID,
+            a_invSnap,
+            a_rawWindow,
+            a_rawSel,
+            a_maxRows,
+            a_expandEnabled);
     }
 
     TargetInfo::TargetMetadata Controller::ResolveTargetMetadata(RE::TESObjectREFR* a_targetRef)
@@ -2608,15 +3002,18 @@ namespace HUDController
             return false;
         }
 
+        const ConfigData cfg = Config::GetSingleton().GetSnapshot();
+        const bool hudOverlayActive = MenuFrameworkUI::IsHudOverlayActive();
+        const bool modernRolloverActive = (cfg.promptStyle == 1 && hudOverlayActive);
+        const bool modernQcActive = (modernRolloverActive && cfg.modernQuickContainer);
+
         auto& movie = *a_hudMenu->uiMovie;
         ResolvedClips clips;
-        const bool ignoreQcAlpha = _qcState.IsHidingAlpha();
+        const bool ignoreQcAlpha = _qcState.IsHidingAlpha() || modernQcActive;
         if (!LocateHUDClips(*a_hudMenu, movie, ignoreQcAlpha, clips)) {
             ClearOverlaySnapshot();
             return false;
         }
-
-        const ConfigData cfg = Config::GetSingleton().GetSnapshot();
         auto* player = RE::PlayerCharacter::GetSingleton();
         const bool inPowerArmor = player && RE::PowerArmor::ActorInPowerArmor(*player);
         const bool bypassActive = inPowerArmor && cfg.powerArmorBypass;
@@ -2666,13 +3063,10 @@ namespace HUDController
             in.smoothingSpeed = cfg.smoothingSpeed;
             in.deltaSeconds = a_timeDelta;
             in.quickContainerVisible = clips.quickContainerVisible;
-            in.hideNativeClip = (cfg.promptStyle == 1 && MenuFrameworkUI::IsHudOverlayActive());
+            in.hideNativeClip = modernRolloverActive;
 
-            RE::Scaleform::GFx::Value visVal;
-            in.rolloverVisible =
-                clips.rollover.GetMember("visible"sv, &visVal) &&
-                visVal.IsBoolean() &&
-                visVal.GetBoolean();
+            in.rolloverVisible = clips.rolloverRawVisible;
+            in.nativeClipVisible = clips.rolloverRawVisible;
             ReadClipBaseTransform(clips.rollover, in);
 
             if (in.enabled && !bypassActive && !in.quickContainerVisible && in.rolloverVisible && targetRef && cam) {
@@ -2687,6 +3081,10 @@ namespace HUDController
 
             const auto out = _state.Step(in);
             if (ApplyTransformToClip(movie, clips.rolloverParent, clips.rollover, out)) {
+                changed = true;
+            } else if (modernRolloverActive && clips.rolloverRawVisible &&
+                       out.action == HUDAction::kNoOp && _state.IsHidingAlpha()) {
+                clips.rollover.SetMember("alpha"sv, RE::Scaleform::GFx::Value(0.0));
                 changed = true;
             }
 
@@ -2773,11 +3171,18 @@ namespace HUDController
                     });
                 }
 
-                if (nextOverlay.target.displayName.empty()) {
-                    std::string rolloverName;
-                    if (TryReadTextField(clips.rollover, "RolloverName_tf"sv, rolloverName)) {
-                        nextOverlay.target.displayName = std::move(rolloverName);
-                    }
+                std::string rolloverName;
+                const bool hasRolloverName = TryReadTextField(clips.rollover, "RolloverName_tf"sv, rolloverName);
+                if (nextOverlay.target.isLoadDoor) {
+                    nextOverlay.target.doorDestination = TargetInfo::ResolveLoadDoorDestination(
+                        hasRolloverName ? rolloverName : std::string_view{},
+                        nextOverlay.target.displayName,
+                        nextOverlay.target.doorDestination,
+                        {});
+                }
+
+                if (nextOverlay.target.displayName.empty() && hasRolloverName) {
+                    nextOverlay.target.displayName = std::move(rolloverName);
                 }
                 if (nextOverlay.target.rawDisplayName.empty() && !nextOverlay.target.displayName.empty()) {
                     nextOverlay.target.rawDisplayName = nextOverlay.target.displayName;
@@ -2787,14 +3192,13 @@ namespace HUDController
 
         // 2. Floating & Modern QuickContainer / Workbench controller
         if (clips.hasQuickContainer) {
-            const bool modernQcActive = (cfg.promptStyle == 1 && cfg.modernQuickContainer && MenuFrameworkUI::IsHudOverlayActive());
-
             HUDFrameInput qcIn{};
             qcIn.enabled = cfg.enabled && (cfg.floatQuickContainer || modernQcActive);
             qcIn.inPowerArmor = inPowerArmor;
             qcIn.powerArmorBypass = cfg.powerArmorBypass;
             qcIn.quickContainerVisible = false;
             qcIn.rolloverVisible = clips.quickContainerVisible;
+            qcIn.nativeClipVisible = clips.quickContainerRawVisible;
             qcIn.smoothingSpeed = cfg.quickContainerSmoothing;
             qcIn.deadzonePx = cfg.quickContainerDeadzone;
             qcIn.hideNativeClip = modernQcActive;
@@ -2838,6 +3242,10 @@ namespace HUDController
             }
             if (ApplyTransformToClip(movie, clips.qcParent, clips.quickContainer, qcApplyOut)) {
                 changed = true;
+            } else if (modernQcActive && clips.quickContainerRawVisible &&
+                       qcOut.action == HUDAction::kNoOp && _qcState.IsHidingAlpha()) {
+                clips.quickContainer.SetMember("alpha"sv, RE::Scaleform::GFx::Value(0.0));
+                changed = true;
             }
 
             const bool publishFloatQc =
@@ -2851,7 +3259,16 @@ namespace HUDController
                 if (hasPreEngineQc) {
                     engineSnap = std::move(preEngineQc);
                 } else {
-                    TryReadEngineQuickContainerState(engineSnap, targetRef, cfg.floatQuickContainer);
+                    std::string sfHeader;
+                    std::string sfFirstItem;
+                    TryReadScaleformQuickContainerIdentity(clips.quickContainer, sfHeader, sfFirstItem);
+                    TryReadEngineQuickContainerState(
+                        engineSnap,
+                        targetRef,
+                        cfg.floatQuickContainer,
+                        sfHeader,
+                        sfFirstItem,
+                        true);
                 }
 
                 const TargetInfo::TargetMetadata targetMeta =

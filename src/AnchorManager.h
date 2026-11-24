@@ -32,6 +32,13 @@ namespace AnchorManager
     [[nodiscard]] Vector3 GetCategoryOffset(TargetCategory a_category, const Config& a_config);
     [[nodiscard]] Vector3 ComputeAnchorPosition(const AnchorInput& a_input, const ConfigData& a_config);
     [[nodiscard]] Vector3 ComputeAnchorPosition(const AnchorInput& a_input, const Config& a_config);
+    [[nodiscard]] Vector3 SelectSafeItemBoundCenter(
+        const Vector3& a_refPosition,
+        bool a_hasRootGeomCenter,
+        const Vector3& a_rootGeomCenter,
+        bool a_hasTargetedCenter,
+        const Vector3& a_targetedCenter,
+        float a_maxDeviation = 40.0f) noexcept;
     [[nodiscard]] bool IsDoorAnchorNodeName(std::string_view a_name);
     [[nodiscard]] bool IsFurnitureMarkerNodeName(std::string_view a_name);
     [[nodiscard]] bool IsTransientEffectNodeName(std::string_view a_name);

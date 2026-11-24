@@ -1393,13 +1393,26 @@ namespace MenuFrameworkUI
                 }
             }
 
+            std::string doorHeader;
+            if (a_cfg.showDoorDestination && a_snap.target.isLoadDoor && !a_snap.target.doorDestination.empty()) {
+                doorHeader = TargetInfo::ToUpperAscii(
+                    TargetInfo::CleanDisplayName(a_snap.target.doorDestination, a_cfg.cleanSorterTags));
+            }
+
             std::string name;
-            if (a_cfg.modernTextMode == 1 || (a_cfg.modernTextMode == 2 && !a_snap.target.hasItemStats)) {
+            if (doorHeader.empty() &&
+                (a_cfg.modernTextMode == 1 || (a_cfg.modernTextMode == 2 && !a_snap.target.hasItemStats))) {
                 name = TargetInfo::CleanDisplayName(a_snap.target.displayName, a_cfg.cleanSorterTags);
                 if (!name.empty() && TargetInfo::ToUpperAscii(name) == actions[0].label) {
                     name.clear();
                 }
             }
+
+            const float doorHeaderFontSize = actionFontSize * 0.86f;
+            const auto doorHeaderSz = doorHeader.empty()
+                ? ImGuiMCP::ImVec2{ 0.0f, 0.0f }
+                : MeasureTextScaled(a_baseFont, doorHeaderFontSize, doorHeader.c_str());
+            const float doorHeaderBlockH = doorHeader.empty() ? 0.0f : (doorHeaderSz.y + 4.0f * scale);
 
             const auto nameSz = name.empty() ? ImGuiMCP::ImVec2{ 0.0f, 0.0f } : MeasureTextScaled(a_baseFont, actionFontSize, name.c_str());
             const float sepW = name.empty() ? 0.0f : (8.0f * scale);
@@ -1461,26 +1474,29 @@ namespace MenuFrameworkUI
             }
 
             const bool stacked = (a_cfg.multiActionLayout == 0);
-            float contentW = 0.0f;
-            float contentH = 0.0f;
+            float actionsContentW = 0.0f;
+            float actionsContentH = 0.0f;
             const float inlineSep = actionGap + 10.0f * scale;
             if (stacked) {
                 for (std::size_t i = 0; i < actions.size(); ++i) {
-                    contentW = std::max(contentW, rowWidths[i]);
-                    contentH += rowHeights[i];
+                    actionsContentW = std::max(actionsContentW, rowWidths[i]);
+                    actionsContentH += rowHeights[i];
                     if (i + 1 < actions.size()) {
-                        contentH += actionGap;
+                        actionsContentH += actionGap;
                     }
                 }
             } else {
                 for (std::size_t i = 0; i < actions.size(); ++i) {
-                    contentW += rowWidths[i];
+                    actionsContentW += rowWidths[i];
                     if (i + 1 < actions.size()) {
-                        contentW += inlineSep;
+                        actionsContentW += inlineSep;
                     }
-                    contentH = std::max(contentH, rowHeights[i]);
+                    actionsContentH = std::max(actionsContentH, rowHeights[i]);
                 }
             }
+
+            const float contentW = std::max(actionsContentW, doorHeaderSz.x);
+            const float contentH = doorHeaderBlockH + actionsContentH;
 
             const float pillW = padX * 2.0f + contentW;
             const float pillH = padY * 2.0f + contentH;
@@ -1572,15 +1588,26 @@ namespace MenuFrameworkUI
                 }
             };
 
+            float contentTopY = y + padY;
+            if (!doorHeader.empty()) {
+                const bool useHeaderShadow = a_cfg.modernTextShadow || bgAlpha < 0.2f;
+                const float headerX = stacked ? (x + padX) : (x + (pillW - doorHeaderSz.x) * 0.5f);
+                DrawTextShadowed(
+                    a_dl, a_baseFont, doorHeaderFontSize, { headerX, contentTopY },
+                    MakeRgbCol(a_cfg.modernAccentColor, overallAlpha),
+                    overallAlpha, useHeaderShadow, scale, doorHeader.c_str());
+                contentTopY += doorHeaderBlockH;
+            }
+
             if (stacked) {
-                float rowTop = y + padY;
+                float rowTop = contentTopY;
                 for (std::size_t i = 0; i < actions.size(); ++i) {
                     drawSingleAction(i, x + padX, rowTop + rowHeights[i] * 0.5f);
                     rowTop += rowHeights[i] + actionGap;
                 }
             } else {
-                float curX = x + padX;
-                const float centerY = y + pillH * 0.5f;
+                float curX = x + (pillW - actionsContentW) * 0.5f;
+                const float centerY = contentTopY + actionsContentH * 0.5f;
                 for (std::size_t i = 0; i < actions.size(); ++i) {
                     drawSingleAction(i, curX, centerY);
                     curX += rowWidths[i] + inlineSep;
@@ -2613,6 +2640,7 @@ namespace MenuFrameworkUI
             bool changed = false;
             changed |= ImGuiMCP::Combo("Prompt Style", &data.promptStyle, kStyles, 2, -1);
             changed |= ImGuiMCP::Combo("Modern Text Mode", &data.modernTextMode, kTextModes, 3, -1);
+            changed |= ImGuiMCP::Checkbox("Show Destination Map Above Load Doors", &data.showDoorDestination);
             changed |= ImGuiMCP::Combo("Multi-Action Layout", &data.multiActionLayout, kMultiActionLayouts, 2, -1);
             changed |= ImGuiMCP::SliderFloat("Multi-Action Row Spacing (px)", &data.modernActionGap, 0.0f, 24.0f, "%.0f");
             changed |= ImGuiMCP::Checkbox("Clean FIS / Sorter Tags ([Scrap], {{...}})", &data.cleanSorterTags);

@@ -267,6 +267,57 @@ namespace TargetInfo
         return stripped.empty() ? clean : stripped;
     }
 
+    std::string ResolveLoadDoorDestination(
+        std::string_view a_rolloverName,
+        std::string_view a_doorBaseName,
+        std::string_view a_teleportCellName,
+        std::string_view a_teleportWorldName)
+    {
+        auto cleanFirstLine = [](std::string_view a_raw) -> std::string {
+            const std::string stripped = Trim(StripSimpleHtml(a_raw));
+            if (stripped.empty()) {
+                return {};
+            }
+            std::size_t start = 0;
+            while (start < stripped.size()) {
+                const auto nl = stripped.find_first_of("\r\n", start);
+                const std::string_view line = (nl == std::string_view::npos)
+                    ? std::string_view(stripped).substr(start)
+                    : std::string_view(stripped).substr(start, nl - start);
+                std::string cleaned = Trim(line);
+                if (!cleaned.empty()) {
+                    return cleaned;
+                }
+                if (nl == std::string::npos) {
+                    break;
+                }
+                start = nl + 1;
+            }
+            return {};
+        };
+
+        const std::string rolloverFirst = cleanFirstLine(a_rolloverName);
+        const std::string baseClean = cleanFirstLine(a_doorBaseName);
+        const std::string cellClean = cleanFirstLine(a_teleportCellName);
+        const std::string worldClean = cleanFirstLine(a_teleportWorldName);
+
+        const std::string rolloverUpper = ToUpperAscii(rolloverFirst);
+        const std::string baseUpper = ToUpperAscii(baseClean);
+
+        if (!rolloverFirst.empty() &&
+            rolloverUpper != "DOOR" &&
+            (baseUpper.empty() || rolloverUpper != baseUpper)) {
+            return rolloverFirst;
+        }
+        if (!cellClean.empty()) {
+            return cellClean;
+        }
+        if (!worldClean.empty()) {
+            return worldClean;
+        }
+        return {};
+    }
+
     ActionParts SplitActivateText(const std::string& a_rawActionLine)
     {
         ActionParts parts;
@@ -729,6 +780,41 @@ namespace TargetInfo
         }
 
         PopulateBoundObjectMetadata(baseObj, extraList, meta);
+
+        if (meta.category == AnchorManager::TargetCategory::kDoor && extraList) {
+            if (const auto* teleport = extraList->GetByType<RE::ExtraTeleport>();
+                teleport && teleport->teleportData &&
+                (teleport->teleportData->transitionCell || teleport->teleportData->linkedDoor)) {
+                meta.isLoadDoor = true;
+                RE::TESObjectCELL* destCell = teleport->teleportData->transitionCell;
+                if (!destCell && teleport->teleportData->linkedDoor) {
+                    if (auto linked = teleport->teleportData->linkedDoor.get()) {
+                        destCell = linked->GetParentCell();
+                    }
+                }
+                if (destCell) {
+                    std::string cellName;
+                    std::string worldName;
+                    if (destCell->IsInterior()) {
+                        cellName = SafeFullName(destCell);
+                        if (cellName.empty()) {
+                            cellName = SafeFullName(destCell->GetLocation());
+                        }
+                    } else {
+                        if (destCell->worldSpace) {
+                            worldName = SafeFullName(destCell->worldSpace);
+                        }
+                        if (worldName.empty()) {
+                            worldName = SafeFullName(destCell);
+                        }
+                        if (worldName.empty()) {
+                            worldName = SafeFullName(destCell->GetLocation());
+                        }
+                    }
+                    meta.doorDestination = ResolveLoadDoorDestination({}, meta.displayName, cellName, worldName);
+                }
+            }
+        }
 
         if (meta.actionVerb.empty()) {
             switch (meta.category) {

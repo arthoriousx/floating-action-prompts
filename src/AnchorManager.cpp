@@ -66,6 +66,43 @@ namespace AnchorManager
         return ComputeAnchorPosition(a_input, a_config.GetSnapshot());
     }
 
+    Vector3 SelectSafeItemBoundCenter(
+        const Vector3& a_refPosition,
+        bool a_hasRootGeomCenter,
+        const Vector3& a_rootGeomCenter,
+        bool a_hasTargetedCenter,
+        const Vector3& a_targetedCenter,
+        float a_maxDeviation) noexcept
+    {
+        auto isFiniteVec = [](const Vector3& v) noexcept {
+            return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
+        };
+        if (!isFiniteVec(a_refPosition)) {
+            return {};
+        }
+
+        const float maxDev = (std::isfinite(a_maxDeviation) && a_maxDeviation >= 0.0f)
+            ? a_maxDeviation
+            : 40.0f;
+
+        auto distanceToRef = [&a_refPosition](const Vector3& v) noexcept {
+            return std::hypot(v.x - a_refPosition.x, v.y - a_refPosition.y, v.z - a_refPosition.z);
+        };
+
+        const bool rootValid = a_hasRootGeomCenter && isFiniteVec(a_rootGeomCenter);
+        const bool targetedValid = a_hasTargetedCenter && isFiniteVec(a_targetedCenter);
+        const float distRoot = rootValid ? distanceToRef(a_rootGeomCenter) : 0.0f;
+        const float distTargeted = targetedValid ? distanceToRef(a_targetedCenter) : 0.0f;
+
+        if (rootValid && std::isfinite(distRoot) && distRoot <= maxDev) {
+            return a_rootGeomCenter;
+        }
+        if (targetedValid && std::isfinite(distTargeted) && distTargeted <= maxDev) {
+            return a_targetedCenter;
+        }
+        return a_refPosition;
+    }
+
     bool IsDoorAnchorNodeName(std::string_view a_name)
     {
         if (a_name.empty()) {
@@ -567,8 +604,9 @@ namespace AnchorManager
         const auto* base = a_ref->GetObjectReference();
         const bool isTerminalOrFurniture = (input.category == TargetCategory::kFurnitureTerminal);
         const bool isActivator = (base && base->GetFormType() == RE::ENUM_FORM_ID::kACTI);
+        const bool isContainer = (input.category == TargetCategory::kContainer);
 
-        if (isTerminalOrFurniture || isActivator) {
+        if (isTerminalOrFurniture || isActivator || isContainer) {
             Vector3 geomCenter{};
             if (refRoot3D && ComputeVisibleGeometryBoundCenter(refRoot3D, geomCenter)) {
                 input.hasBoundCenter = true;
@@ -583,6 +621,51 @@ namespace AnchorManager
                 if (a_outUsedGeometry) {
                     *a_outUsedGeometry = true;
                 }
+            }
+        } else if (input.category == TargetCategory::kItem) {
+            Vector3 rootGeomCenter{};
+            bool hasRootGeom = false;
+            bool usedRootGeom = false;
+            if (refRoot3D && ComputeVisibleGeometryBoundCenter(refRoot3D, rootGeomCenter)) {
+                hasRootGeom = true;
+                usedRootGeom = true;
+            } else if (root3D && root3D->worldBound.fRadius > 0.001f) {
+                rootGeomCenter = {
+                    root3D->worldBound.center.x,
+                    root3D->worldBound.center.y,
+                    root3D->worldBound.center.z
+                };
+                hasRootGeom = true;
+            }
+
+            Vector3 targetedCenter{};
+            bool hasTargetedGeom = false;
+            bool usedTargetedGeom = false;
+            if (a_targeted3D && IsTargetedSubtreeVisibleNonMarker(a_targeted3D, refRoot3D)) {
+                if (ComputeVisibleGeometryBoundCenter(a_targeted3D, targetedCenter)) {
+                    hasTargetedGeom = true;
+                    usedTargetedGeom = true;
+                } else if (!IsExcludedNodeOrEffect(a_targeted3D, a_targeted3D != refRoot3D) &&
+                           a_targeted3D->worldBound.fRadius > 0.001f) {
+                    targetedCenter = {
+                        a_targeted3D->worldBound.center.x,
+                        a_targeted3D->worldBound.center.y,
+                        a_targeted3D->worldBound.center.z
+                    };
+                    hasTargetedGeom = true;
+                }
+            }
+
+            input.boundCenter = SelectSafeItemBoundCenter(
+                input.refPosition,
+                hasRootGeom,
+                rootGeomCenter,
+                hasTargetedGeom,
+                targetedCenter,
+                40.0f);
+            input.hasBoundCenter = true;
+            if (a_outUsedGeometry) {
+                *a_outUsedGeometry = usedRootGeom || usedTargetedGeom;
             }
         }
 

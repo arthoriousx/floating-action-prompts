@@ -2,7 +2,7 @@
   "modName": "FloatingActionPrompts",
   "displayName": "FAP - Floating Action Prompts",
   "author": "ArthoriousX",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "minMcmVersion": 1,
   "pages": [
     {
@@ -114,6 +114,13 @@
             "sourceType": "ModSettingInt",
             "options": ["Action Only (GTA 6)", "Action + Name", "Name on World Objects"]
           }
+        },
+        {
+          "type": "switcher",
+          "id": "bShowDoorDestination:Visual",
+          "text": "Show Destination Map Above Load Doors",
+          "help": "Display the destination cell or worldspace name above the prompt when aiming at transition/load doors.",
+          "valueOptions": { "sourceType": "ModSettingBool" }
         },
         {
           "type": "switcher",

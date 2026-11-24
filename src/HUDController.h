@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "Config.h"
@@ -11,7 +12,6 @@
 #ifndef FAP_UNIT_TEST
 #include <atomic>
 #include <mutex>
-#include <unordered_map>
 #include "RE/Fallout.h"
 
 namespace RE
@@ -30,7 +30,8 @@ namespace HUDController
     {
         kNoOp,
         kApplyFloat,
-        kRestoreBaseline
+        kRestoreBaseline,
+        kSuppressNative
     };
 
     struct HUDFrameInput
@@ -40,6 +41,7 @@ namespace HUDController
         bool powerArmorBypass{ true };
         bool quickContainerVisible{ false };
         bool rolloverVisible{ false };
+        bool nativeClipVisible{ false };
         bool hasTarget{ false };
         Projection::ScreenCoord projectedTarget{};
         float smoothingSpeed{ 0.25f };
@@ -70,6 +72,8 @@ namespace HUDController
         bool isEquipped{ false };
         TargetInfo::ItemKind itemKind{ TargetInfo::ItemKind::None };
         std::uint64_t stackSignature{ 0 };
+        std::uint32_t value{ 0 };
+        float weight{ 0.0f };
     };
 
     struct QuickContainerMergeResult
@@ -141,7 +145,7 @@ namespace HUDController
         static constexpr int kLossGraceFrames = 2;
 
         [[nodiscard]] HUDFrameOutput Step(const HUDFrameInput& a_in);
-        [[nodiscard]] bool IsHidingAlpha() const noexcept { return _isFloating && _hidingAlpha; }
+        [[nodiscard]] bool IsHidingAlpha() const noexcept { return (_isFloating || _modifiedAlpha) && _hidingAlpha; }
         [[nodiscard]] bool HasLastScreen() const noexcept { return _hasPrevScreen; }
         [[nodiscard]] Projection::ScreenCoord LastScreen() const noexcept { return _prevScreen; }
         void Reset() noexcept;
@@ -181,6 +185,47 @@ namespace HUDController
         int a_preferredOrder = -1,
         std::int32_t a_prevStart = -1);
 
+    struct CachedInventorySnapshot
+    {
+        std::uint32_t ownerFormID{ 0 };
+        std::size_t rawListSize{ 0 };
+        std::size_t rawStackCount{ 0 };
+        std::uint64_t rawTotalCountSum{ 0 };
+        bool skipEquipped{ false };
+        bool truncatedByCap{ false };
+        std::int64_t timestampMs{ 0 };
+        std::uint64_t generation{ 0 };
+        std::vector<QuickContainerItemEntry> items;
+        std::unordered_map<std::string, TargetInfo::ItemKind> kindByCleanUpper;
+    };
+
+    struct QuickContainerMergeCache
+    {
+        std::uint32_t ownerFormID{ 0 };
+        std::uint64_t invGeneration{ 0 };
+        std::size_t rawWindowHash{ 0 };
+        std::int32_t rawSel{ -1 };
+        int maxRows{ 0 };
+        bool expandEnabled{ true };
+        std::uint32_t stickyOwnerFormID{ 0 };
+        std::uint64_t stickyInvGen{ 0 };
+        int lockedOrderIndex{ -1 };
+        std::int32_t lastMatchedStart{ -1 };
+        bool stickyFallback{ false };
+        bool everExpanded{ false };
+        int consecutiveMisses{ 0 };
+        QuickContainerMergeResult result{};
+    };
+
+    [[nodiscard]] const QuickContainerMergeResult& ResolveMergedQuickContainerWindow(
+        QuickContainerMergeCache& a_cache,
+        std::uint32_t a_ownerFormID,
+        const CachedInventorySnapshot& a_invSnap,
+        const std::vector<QuickContainerItemEntry>& a_rawWindow,
+        std::int32_t a_rawSel,
+        int a_maxRows,
+        bool a_expandEnabled = true);
+
 #ifndef FAP_UNIT_TEST
     class Controller final :
         public RE::BSTEventSink<RE::MenuOpenCloseEvent>,
@@ -212,36 +257,6 @@ namespace HUDController
         Controller() = default;
 
     public:
-        struct CachedInventorySnapshot
-        {
-            std::uint32_t ownerFormID{ 0 };
-            std::size_t rawListSize{ 0 };
-            std::size_t rawStackCount{ 0 };
-            std::uint64_t rawTotalCountSum{ 0 };
-            bool skipEquipped{ false };
-            bool truncatedByCap{ false };
-            std::int64_t timestampMs{ 0 };
-            std::uint64_t generation{ 0 };
-            std::vector<QuickContainerItemEntry> items;
-            std::unordered_map<std::string, TargetInfo::ItemKind> kindByCleanUpper;
-        };
-
-        struct QuickContainerMergeCache
-        {
-            std::uint32_t ownerFormID{ 0 };
-            std::uint64_t invGeneration{ 0 };
-            std::size_t rawWindowHash{ 0 };
-            std::int32_t rawSel{ -1 };
-            int maxRows{ 0 };
-            bool expandEnabled{ true };
-            std::uint32_t stickyOwnerFormID{ 0 };
-            std::uint64_t stickyInvGen{ 0 };
-            int lockedOrderIndex{ -1 };
-            std::int32_t lastMatchedStart{ -1 };
-            bool stickyFallback{ false };
-            QuickContainerMergeResult result{};
-        };
-
         [[nodiscard]] const QuickContainerMergeResult& ResolveMergedQuickContainerWindow(
             std::uint32_t a_ownerFormID,
             const CachedInventorySnapshot& a_invSnap,

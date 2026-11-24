@@ -237,6 +237,7 @@ namespace
                     else if (key == "fModernOpacity") a_target.modernOpacity = std::stof(valStr);
                     else if (key == "bInlineItemInfo") a_target.inlineItemInfo = ParseBool(valStr);
                     else if (key == "iModernTextMode") a_target.modernTextMode = std::stoi(valStr);
+                    else if (key == "bShowDoorDestination") a_target.showDoorDestination = ParseBool(valStr);
                     else if (key == "bCleanSorterTags") a_target.cleanSorterTags = ParseBool(valStr);
                     else if (key == "fModernBgOpacity") a_target.modernBgOpacity = std::stof(valStr);
                     else if (key == "bModernBorder") a_target.modernBorder = ParseBool(valStr);
@@ -375,6 +376,7 @@ namespace
         file << "fModernOpacity=" << a_data.modernOpacity << "\n";
         file << "bInlineItemInfo=" << (a_data.inlineItemInfo ? 1 : 0) << "\n";
         file << "iModernTextMode=" << a_data.modernTextMode << "\n";
+        file << "bShowDoorDestination=" << (a_data.showDoorDestination ? 1 : 0) << "\n";
         file << "bCleanSorterTags=" << (a_data.cleanSorterTags ? 1 : 0) << "\n";
         file << "fModernBgOpacity=" << a_data.modernBgOpacity << "\n";
         file << "bModernBorder=" << (a_data.modernBorder ? 1 : 0) << "\n";

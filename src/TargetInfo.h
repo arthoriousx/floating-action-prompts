@@ -67,6 +67,10 @@ namespace TargetInfo
         bool isArmor{ false };
         std::uint32_t armorRating{ 0 };
 
+        // Door transition metadata
+        bool isLoadDoor{ false };
+        std::string doorDestination;
+
         // NPC stats
         bool isNpc{ false };
         std::string equippedWeapon;
@@ -87,6 +91,11 @@ namespace TargetInfo
     [[nodiscard]] std::string ToUpperAscii(const std::string& a_input);
     [[nodiscard]] std::string CleanDisplayName(const std::string& a_raw, bool a_stripSorterTags);
     [[nodiscard]] std::string ResolveTranslationFallback(std::string_view a_raw);
+    [[nodiscard]] std::string ResolveLoadDoorDestination(
+        std::string_view a_rolloverName,
+        std::string_view a_doorBaseName,
+        std::string_view a_teleportCellName,
+        std::string_view a_teleportWorldName);
     [[nodiscard]] ActionParts SplitActivateText(const std::string& a_rawActionLine);
     [[nodiscard]] std::string FormatInlineSummary(const TargetMetadata& a_meta, const ConfigData& a_cfg);
     [[nodiscard]] std::vector<CardRow> BuildInfoCardRows(const TargetMetadata& a_meta, const ConfigData& a_cfg);

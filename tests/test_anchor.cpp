@@ -1,5 +1,6 @@
 #include "check.h"
 #include <iostream>
+#include <limits>
 #include "../src/Config.h"
 #include "../src/AnchorManager.h"
 
@@ -163,6 +164,65 @@ int main()
     CHECK(!AnchorManager::IsTransientEffectNodeName("TerminalGlow"));
     CHECK(!AnchorManager::IsTransientEffectNodeName("WorkshopAddon"));
     CHECK(!AnchorManager::IsTransientEffectNodeName(""));
+
+    // 10. SelectSafeItemBoundCenter protects loose items from skewed headlamp/FX bounds
+    {
+        const Vector3 refPos{ 100.0f, 200.0f, 50.0f };
+
+        // 10a. Normal loose item within deviation uses rootGeomCenter
+        const Vector3 normalRoot{ 104.0f, 203.0f, 56.0f };
+        const Vector3 normalOut = AnchorManager::SelectSafeItemBoundCenter(
+            refPos, true, normalRoot, true, { 101.0f, 201.0f, 52.0f }, 40.0f);
+        CHECK_NEAR(normalOut.x, normalRoot.x, 0.001f);
+        CHECK_NEAR(normalOut.y, normalRoot.y, 0.001f);
+        CHECK_NEAR(normalOut.z, normalRoot.z, 0.001f);
+
+        // 10b. Skewed headlamp/FX root bound (120 units away) falls back to close targeted sub-mesh
+        const Vector3 skewedRoot{ 220.0f, 200.0f, 50.0f };
+        const Vector3 closeTargeted{ 103.0f, 202.0f, 53.0f };
+        const Vector3 skewedOut = AnchorManager::SelectSafeItemBoundCenter(
+            refPos, true, skewedRoot, true, closeTargeted, 40.0f);
+        CHECK_NEAR(skewedOut.x, closeTargeted.x, 0.001f);
+        CHECK_NEAR(skewedOut.y, closeTargeted.y, 0.001f);
+        CHECK_NEAR(skewedOut.z, closeTargeted.z, 0.001f);
+
+        // 10c. Skewed root bound with no valid targeted center falls back safely to refPos
+        const Vector3 noTargetOut = AnchorManager::SelectSafeItemBoundCenter(
+            refPos, true, skewedRoot, false, {}, 40.0f);
+        CHECK_NEAR(noTargetOut.x, refPos.x, 0.001f);
+        CHECK_NEAR(noTargetOut.y, refPos.y, 0.001f);
+        CHECK_NEAR(noTargetOut.z, refPos.z, 0.001f);
+
+        // 10d. Both root and targeted absent falls back to refPos
+        const Vector3 emptyOut = AnchorManager::SelectSafeItemBoundCenter(
+            refPos, false, {}, false, {}, 40.0f);
+        CHECK_NEAR(emptyOut.x, refPos.x, 0.001f);
+        CHECK_NEAR(emptyOut.y, refPos.y, 0.001f);
+        CHECK_NEAR(emptyOut.z, refPos.z, 0.001f);
+
+        // 10e. Intermediate skewed root bound (60 units, > maxDev 40) falls back strictly to refPos
+        const Vector3 midSkewedRoot{ 160.0f, 200.0f, 50.0f };
+        const Vector3 midOut = AnchorManager::SelectSafeItemBoundCenter(
+            refPos, true, midSkewedRoot, false, {}, 40.0f);
+        CHECK_NEAR(midOut.x, refPos.x, 0.001f);
+        CHECK_NEAR(midOut.y, refPos.y, 0.001f);
+        CHECK_NEAR(midOut.z, refPos.z, 0.001f);
+
+        // 10f. NaN rootGeomCenter falls back cleanly to valid targetedCenter or refPos
+        const float qNan = std::numeric_limits<float>::quiet_NaN();
+        const Vector3 nanRoot{ qNan, 200.0f, 50.0f };
+        const Vector3 nanWithTarget = AnchorManager::SelectSafeItemBoundCenter(
+            refPos, true, nanRoot, true, closeTargeted, 40.0f);
+        CHECK_NEAR(nanWithTarget.x, closeTargeted.x, 0.001f);
+        CHECK_NEAR(nanWithTarget.y, closeTargeted.y, 0.001f);
+        CHECK_NEAR(nanWithTarget.z, closeTargeted.z, 0.001f);
+
+        const Vector3 nanBoth = AnchorManager::SelectSafeItemBoundCenter(
+            refPos, true, nanRoot, true, nanRoot, 40.0f);
+        CHECK_NEAR(nanBoth.x, refPos.x, 0.001f);
+        CHECK_NEAR(nanBoth.y, refPos.y, 0.001f);
+        CHECK_NEAR(nanBoth.z, refPos.z, 0.001f);
+    }
 
     std::cout << "[TEST] test_anchor PASSED" << std::endl;
     return 0;

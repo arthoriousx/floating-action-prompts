@@ -39,6 +39,7 @@ struct ConfigData
     float modernOpacity{ 0.85f };
     bool inlineItemInfo{ false };
     int modernTextMode{ 0 };         // 0 = Action Only, 1 = Action + Name, 2 = Name on World Objects Only
+    bool showDoorDestination{ true };
     bool cleanSorterTags{ true };
     float modernBgOpacity{ 0.0f };
     bool modernBorder{ false };

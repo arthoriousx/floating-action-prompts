@@ -1,4 +1,5 @@
 #include "check.h"
+#include <cstdio>
 #include <iostream>
 #include <limits>
 #include "../src/Config.h"
@@ -776,6 +777,383 @@ int main()
             CHECK(res.windowItems.size() == 5);
             CHECK(res.hasMoreAbove == false);
             CHECK(res.hasMoreBelow == false);
+        }
+    }
+
+    // 12. Native QuickContainer close animation stays suppressed at alpha 0 until nativeClipVisible turns false
+    {
+        HUDController::HUDTransformState qcState;
+        HUDController::HUDFrameInput in{};
+        in.enabled = true;
+        in.rolloverVisible = true;
+        in.nativeClipVisible = true;
+        in.hasTarget = true;
+        in.projectedTarget = { 540.0f, 360.0f, 1.0f, true };
+        in.currentClipX = 640.0f;
+        in.currentClipY = 380.0f;
+        in.hideNativeClip = true;
+
+        const auto openOut = qcState.Step(in);
+        CHECK(openOut.action == HUDController::HUDAction::kApplyFloat);
+        CHECK_NEAR(openOut.alpha, 0.0f, 0.001f);
+
+        // Look away: Scaleform clears Shown (rolloverVisible = false) and targetRef drops,
+        // while QuickContainerWidget_mc.visible (nativeClipVisible) stays true for close animation
+        in.rolloverVisible = false;
+        in.hasTarget = false;
+        in.nativeClipVisible = true;
+        CHECK(qcState.Step(in).action == HUDController::HUDAction::kNoOp); // grace frame 1
+        CHECK(qcState.Step(in).action == HUDController::HUDAction::kNoOp); // grace frame 2
+
+        // Frame 3+: emits kSuppressNative with alpha = 0 (never flashes alpha = 1.0)
+        for (int f = 0; f < 4; ++f) {
+            const auto supOut = qcState.Step(in);
+            CHECK(supOut.action == HUDController::HUDAction::kSuppressNative);
+            CHECK(!supOut.applyPosition);
+            CHECK(supOut.applyAlpha);
+            CHECK_NEAR(supOut.alpha, 0.0f, 0.001f);
+            CHECK(qcState.IsHidingAlpha());
+        }
+
+        // Re-entering a new container directly from kSuppressNative preserves original vanilla baseline (640, 380)
+        in.rolloverVisible = true;
+        in.hasTarget = true;
+        in.currentClipX = 540.0f; // stale floated clip position, must NOT overwrite baseline
+        in.currentClipY = 360.0f;
+        const auto reenterOut = qcState.Step(in);
+        CHECK(reenterOut.action == HUDController::HUDAction::kApplyFloat);
+        CHECK_NEAR(reenterOut.alpha, 0.0f, 0.001f);
+
+        // Look away again until close animation ends (nativeClipVisible -> false)
+        in.rolloverVisible = false;
+        in.hasTarget = false;
+        in.nativeClipVisible = true;
+        CHECK(qcState.Step(in).action == HUDController::HUDAction::kNoOp);
+        CHECK(qcState.Step(in).action == HUDController::HUDAction::kNoOp);
+        CHECK(qcState.Step(in).action == HUDController::HUDAction::kSuppressNative);
+
+        in.nativeClipVisible = false;
+        const auto restOut = qcState.Step(in);
+        CHECK(restOut.action == HUDController::HUDAction::kRestoreBaseline);
+        CHECK(restOut.applyPosition);
+        CHECK(restOut.applyAlpha);
+        CHECK_NEAR(restOut.x, 640.0f, 0.01f);
+        CHECK_NEAR(restOut.y, 380.0f, 0.01f);
+        CHECK_NEAR(restOut.alpha, 1.0f, 0.001f);
+        CHECK(!qcState.IsHidingAlpha());
+
+        // Disabling hideNativeClip during kSuppressNative immediately restores alpha = 1.0
+        in.rolloverVisible = true;
+        in.hasTarget = true;
+        in.nativeClipVisible = true;
+        in.currentClipX = 700.0f;
+        in.currentClipY = 400.0f;
+        CHECK(qcState.Step(in).action == HUDController::HUDAction::kApplyFloat);
+        in.rolloverVisible = false;
+        in.hasTarget = false;
+        CHECK(qcState.Step(in).action == HUDController::HUDAction::kNoOp);
+        CHECK(qcState.Step(in).action == HUDController::HUDAction::kNoOp);
+        CHECK(qcState.Step(in).action == HUDController::HUDAction::kSuppressNative);
+        in.hideNativeClip = false;
+        const auto toggleOffOut = qcState.Step(in);
+        CHECK(toggleOffOut.action == HUDController::HUDAction::kRestoreBaseline);
+        CHECK(toggleOffOut.applyAlpha);
+        CHECK_NEAR(toggleOffOut.alpha, 1.0f, 0.001f);
+        CHECK_NEAR(toggleOffOut.x, 700.0f, 0.01f);
+        CHECK_NEAR(toggleOffOut.y, 400.0f, 0.01f);
+    }
+
+    // 13. ResolveMergedQuickContainerWindow recovers seamlessly to 12 rows after looting desync
+    {
+        auto mkItem = [](std::string a_name, std::uint32_t a_count, TargetInfo::ItemKind a_kind = TargetInfo::ItemKind::Aid) {
+            HUDController::QuickContainerItemEntry e;
+            e.name = std::move(a_name);
+            e.count = a_count;
+            e.itemKind = a_kind;
+            return e;
+        };
+
+        std::vector<HUDController::QuickContainerItemEntry> inv15;
+        for (int i = 0; i < 15; ++i) {
+            char nameBuf[32]{};
+            std::snprintf(nameBuf, sizeof(nameBuf), "Item %02d", i);
+            inv15.push_back(mkItem(nameBuf, 1));
+        }
+
+        HUDController::QuickContainerMergeCache cache;
+        HUDController::CachedInventorySnapshot snap1;
+        snap1.ownerFormID = 0x1001u;
+        snap1.generation = 1u;
+        snap1.items = inv15;
+
+        // 13a. Expanded at middle of 15-item container (maxRows = 12)
+        std::vector<HUDController::QuickContainerItemEntry> engMid{
+            inv15[5], inv15[6], inv15[7], inv15[8], mkItem("...", 1)
+        };
+        const auto& r0 = HUDController::ResolveMergedQuickContainerWindow(
+            cache, 0x1001u, snap1, engMid, 1, 12, true);
+        CHECK(r0.expanded == true);
+        CHECK(r0.windowItems.size() == 12);
+        CHECK(r0.totalItemCount == 15);
+        CHECK(r0.selectedIndex == 6);
+
+        // Take Item 06 in the middle: inventory updates immediately (gen 2, 14 items),
+        // while Scaleform rawWindow is desynced by 1 frame (still holds Item 06)
+        HUDController::CachedInventorySnapshot snap2 = snap1;
+        snap2.generation = 2u;
+        snap2.items.erase(snap2.items.begin() + 6); // 14 items remain
+
+        const auto& rDesync = HUDController::ResolveMergedQuickContainerWindow(
+            cache, 0x1001u, snap2, engMid, 1, 12, true);
+        CHECK(rDesync.expanded == true);
+        CHECK(rDesync.windowItems.size() == 12); // Holds 12 rows without flashing down to 4
+
+        // Next frame Scaleform updates rawWindow with mappedSel == 0 -> must recover to 12 rows!
+        std::vector<HUDController::QuickContainerItemEntry> engMidAfter{
+            snap2.items[6], snap2.items[7], snap2.items[8], snap2.items[9], mkItem("...", 1)
+        };
+        const auto& rMidRecovered = HUDController::ResolveMergedQuickContainerWindow(
+            cache, 0x1001u, snap2, engMidAfter, 0, 12, true);
+        CHECK(rMidRecovered.expanded == true);
+        CHECK(rMidRecovered.totalItemCount == 14);
+        CHECK(rMidRecovered.windowItems.size() == 12);
+        CHECK(rMidRecovered.selectedIndex == 6);
+
+        // 13b. Taking item near bottom (5 items, no "...") after 1-frame desync stays at 12 rows
+        std::vector<HUDController::QuickContainerItemEntry> engBot{
+            snap2.items[9], snap2.items[10], snap2.items[11], snap2.items[12], snap2.items[13]
+        };
+        const auto& rBot = HUDController::ResolveMergedQuickContainerWindow(
+            cache, 0x1001u, snap2, engBot, 2, 12, true);
+        CHECK(rBot.expanded == true);
+        CHECK(rBot.windowItems.size() == 12);
+
+        HUDController::CachedInventorySnapshot snap3 = snap2;
+        snap3.generation = 3u;
+        snap3.items.erase(snap3.items.begin() + 11); // 13 items remain
+
+        const auto& rBotDesync = HUDController::ResolveMergedQuickContainerWindow(
+            cache, 0x1001u, snap3, engBot, 2, 12, true);
+        CHECK(rBotDesync.expanded == true);
+        CHECK(rBotDesync.windowItems.size() == 12);
+
+        std::vector<HUDController::QuickContainerItemEntry> engBotAfter{
+            snap3.items[8], snap3.items[9], snap3.items[10], snap3.items[11], snap3.items[12]
+        };
+        const auto& rBotRecovered = HUDController::ResolveMergedQuickContainerWindow(
+            cache, 0x1001u, snap3, engBotAfter, 3, 12, true);
+        CHECK(rBotRecovered.expanded == true);
+        CHECK(rBotRecovered.totalItemCount == 13);
+        CHECK(rBotRecovered.windowItems.size() == 12);
+
+        // 13c. Taking item at start of list after desync stays at 12 rows
+        std::vector<HUDController::QuickContainerItemEntry> engTop{
+            snap3.items[0], snap3.items[1], snap3.items[2], snap3.items[3], mkItem("...", 1)
+        };
+        const auto& rTop = HUDController::ResolveMergedQuickContainerWindow(
+            cache, 0x1001u, snap3, engTop, 0, 12, true);
+        CHECK(rTop.expanded == true);
+        CHECK(rTop.windowItems.size() == 12);
+
+        HUDController::CachedInventorySnapshot snap4 = snap3;
+        snap4.generation = 4u;
+        snap4.items.erase(snap4.items.begin()); // 12 items remain
+
+        const auto& rTopDesync = HUDController::ResolveMergedQuickContainerWindow(
+            cache, 0x1001u, snap4, engTop, 0, 12, true);
+        CHECK(rTopDesync.expanded == true);
+        CHECK(rTopDesync.windowItems.size() == 12);
+
+        std::vector<HUDController::QuickContainerItemEntry> engTopAfter{
+            snap4.items[0], snap4.items[1], snap4.items[2], snap4.items[3], mkItem("...", 1)
+        };
+        const auto& rTopRecovered = HUDController::ResolveMergedQuickContainerWindow(
+            cache, 0x1001u, snap4, engTopAfter, 0, 12, true);
+        CHECK(rTopRecovered.expanded == true);
+        CHECK(rTopRecovered.totalItemCount == 12);
+        CHECK(rTopRecovered.windowItems.size() == 12);
+
+        // 13d. Genuinely custom-sorted container that never expanded still falls back safely after 3 misses
+        HUDController::QuickContainerMergeCache customCache;
+        HUDController::CachedInventorySnapshot customSnap;
+        customSnap.ownerFormID = 0x2002u;
+        customSnap.generation = 1u;
+        customSnap.items = {
+            inv15[10], inv15[1], inv15[8], inv15[3], inv15[12], inv15[0], inv15[7]
+        };
+        std::vector<HUDController::QuickContainerItemEntry> customEng{
+            inv15[0], inv15[1], inv15[2], inv15[3], mkItem("...", 1)
+        };
+        for (int m = 0; m < 3; ++m) {
+            const auto& rCustom = HUDController::ResolveMergedQuickContainerWindow(
+                customCache, 0x2002u, customSnap, customEng, 0, 12, true);
+            CHECK(rCustom.expanded == false);
+            CHECK(rCustom.windowItems.size() == 4);
+        }
+        CHECK(customCache.stickyFallback == true);
+    }
+
+    // 14. Value-descending re-sort after looting, alphabetical prefix ties, and category+value sort
+    {
+        auto mkValItem = [](
+            std::string_view a_name,
+            std::uint32_t a_value,
+            float a_weight,
+            TargetInfo::ItemKind a_kind = TargetInfo::ItemKind::MiscJunk,
+            std::uint32_t a_count = 1u)
+        {
+            HUDController::QuickContainerItemEntry e;
+            e.name = std::string(a_name);
+            e.count = a_count;
+            e.itemKind = a_kind;
+            e.value = a_value;
+            e.weight = a_weight;
+            return e;
+        };
+
+        // 14a. Container switches from alphabetical (order 2) to Value DESC (order 5) after removing 2 items
+        HUDController::CachedInventorySnapshot snap;
+        snap.ownerFormID = 0x5555u;
+        snap.generation = 1u;
+        snap.items = {
+            mkValItem("Rusty Metal Cup", 9, 0.5f),
+            mkValItem("Busted Box Torch", 300, 2.0f),
+            mkValItem("Small Rusty Thermos", 54, 0.4f),
+            mkValItem("Used Gas Mask Filter", 67, 1.0f),
+            mkValItem("Fine Feathers", 60, 0.2f),
+            mkValItem("Biometric Scanner", 20, 3.0f, TargetInfo::ItemKind::MiscJunk, 2u),
+            mkValItem("Can Of Screws", 40, 1.0f),
+            mkValItem("Brahmin Hide", 8, 2.0f),
+            mkValItem("Wallet", 33, 1.0f),
+            mkValItem("Duct Tape", 12, 0.1f),
+            mkValItem("Fuse", 15, 0.5f, TargetInfo::ItemKind::MiscJunk, 3u),
+            mkValItem("Gas Canister", 28, 3.0f),
+            mkValItem("Office Desk Fan", 22, 3.0f),
+            mkValItem("Used Oil Can", 16, 2.0f),
+            mkValItem("White Bottle", 4, 0.5f),
+            mkValItem("Tin Can", 2, 0.1f)
+        };
+
+        std::vector<HUDController::QuickContainerItemEntry> engAlphaTop{
+            mkValItem("Biometric Scanner", 20, 3.0f, TargetInfo::ItemKind::MiscJunk, 2u),
+            mkValItem("Brahmin Hide", 8, 2.0f),
+            mkValItem("Busted Box Torch", 300, 2.0f),
+            mkValItem("Can Of Screws", 40, 1.0f),
+            mkValItem("...", 1, 0.0f)
+        };
+        HUDController::QuickContainerMergeCache cache;
+        const auto& rInitial = HUDController::ResolveMergedQuickContainerWindow(
+            cache, 0x5555u, snap, engAlphaTop, 0, 12, true);
+        CHECK(rInitial.expanded == true);
+        CHECK(rInitial.matchedOrderIndex == 2);
+        CHECK(rInitial.totalItemCount == 16);
+        CHECK(rInitial.windowItems.size() == 12);
+
+        // Remove 2 low-value items ("Tin Can" and "Duct Tape"), engine re-sorts visible rows by Value DESC
+        HUDController::CachedInventorySnapshot snapAfter = snap;
+        snapAfter.generation = 2u;
+        snapAfter.items.pop_back(); // removes "Tin Can"
+        snapAfter.items.erase(snapAfter.items.begin() + 9); // removes "Duct Tape"
+
+        std::vector<HUDController::QuickContainerItemEntry> engValueTop{
+            mkValItem("Busted Box Torch", 300, 2.0f),
+            mkValItem("Used Gas Mask Filter", 67, 1.0f),
+            mkValItem("Fine Feathers", 60, 0.2f),
+            mkValItem("Small Rusty Thermos", 54, 0.4f),
+            mkValItem("...", 1, 0.0f)
+        };
+        const auto& rResorted = HUDController::ResolveMergedQuickContainerWindow(
+            cache, 0x5555u, snapAfter, engValueTop, 0, 12, true);
+        CHECK(rResorted.expanded == true);
+        CHECK(rResorted.matchedOrderIndex == 5);
+        CHECK(rResorted.totalItemCount == 14);
+        CHECK(rResorted.windowItems.size() == 12);
+        CHECK(rResorted.windowItems[0].name == "Busted Box Torch");
+        CHECK(rResorted.windowItems[4].name == "Can Of Screws");
+        CHECK(cache.stickyFallback == false);
+
+        // 14b. Alphabetical prefix tie against raw swap-and-popped BGSInventoryList prefers alphabetical (order 2)
+        std::vector<HUDController::QuickContainerItemEntry> tieInv{
+            mkValItem("Alpha", 10, 1.0f),
+            mkValItem("Bravo", 10, 1.0f),
+            mkValItem("Charlie", 10, 1.0f),
+            mkValItem("Delta", 10, 1.0f),
+            mkValItem("Wallet", 10, 1.0f), // swap-and-popped non-alphabetical item at raw index 4
+            mkValItem("Echo", 10, 1.0f),
+            mkValItem("Foxtrot", 10, 1.0f),
+            mkValItem("Golf", 10, 1.0f)
+        };
+        std::vector<HUDController::QuickContainerItemEntry> tieEng{
+            mkValItem("Alpha", 10, 1.0f),
+            mkValItem("Bravo", 10, 1.0f),
+            mkValItem("Charlie", 10, 1.0f),
+            mkValItem("Delta", 10, 1.0f),
+            mkValItem("...", 1, 0.0f)
+        };
+        const auto rTie = HUDController::MergeQuickContainerInventory(tieEng, 0, tieInv, 12);
+        CHECK(rTie.expanded == true);
+        CHECK(rTie.matchedOrderIndex == 2);
+        CHECK(rTie.windowItems.size() == 8);
+        CHECK(rTie.windowItems[4].name == "Echo");
+
+        // 14c. Category ASC + Value DESC sort (order 8): Key -> Weapon -> Armor -> Aid -> MiscJunk
+        std::vector<HUDController::QuickContainerItemEntry> catInv{
+            mkValItem("Expensive Junk", 500, 1.0f, TargetInfo::ItemKind::MiscJunk),
+            mkValItem("Laser Rifle", 120, 4.0f, TargetInfo::ItemKind::Weapon),
+            mkValItem("Storage Key", 0, 0.0f, TargetInfo::ItemKind::Key),
+            mkValItem("Combat Armor", 140, 5.0f, TargetInfo::ItemKind::Armor),
+            mkValItem("Stimpak", 48, 0.1f, TargetInfo::ItemKind::Aid),
+            mkValItem("Desk Fan", 22, 3.0f, TargetInfo::ItemKind::MiscJunk),
+            mkValItem("Scrap Copper", 15, 0.5f, TargetInfo::ItemKind::MiscJunk)
+        };
+        std::vector<HUDController::QuickContainerItemEntry> catEng{
+            mkValItem("Storage Key", 0, 0.0f, TargetInfo::ItemKind::Key),
+            mkValItem("Laser Rifle", 120, 4.0f, TargetInfo::ItemKind::Weapon),
+            mkValItem("Combat Armor", 140, 5.0f, TargetInfo::ItemKind::Armor),
+            mkValItem("Stimpak", 48, 0.1f, TargetInfo::ItemKind::Aid),
+            mkValItem("...", 1, 0.0f)
+        };
+        const auto rCat = HUDController::MergeQuickContainerInventory(catEng, 0, catInv, 12);
+        CHECK(rCat.expanded == true);
+        CHECK(rCat.matchedOrderIndex == 8);
+        CHECK(rCat.totalItemCount == 7);
+        CHECK(rCat.windowItems.size() == 7);
+        CHECK(rCat.windowItems[4].name == "Expensive Junk");
+
+        // 14d. NaN weights in MergeQuickContainerInventory are safely sanitized during Value/Weight & Weight sorting
+        const float qNan = std::numeric_limits<float>::quiet_NaN();
+        std::vector<HUDController::QuickContainerItemEntry> nanInv{
+            mkValItem("Zeta", 10, qNan),
+            mkValItem("Busted Box Torch", 300, qNan),
+            mkValItem("Used Gas Mask Filter", 67, 1.0f),
+            mkValItem("Fine Feathers", 60, qNan),
+            mkValItem("Small Rusty Thermos", 54, 0.4f),
+            mkValItem("Can Of Screws", 40, 1.0f),
+            mkValItem("Alpha", 5, qNan)
+        };
+        const auto rNan = HUDController::MergeQuickContainerInventory(engValueTop, 0, nanInv, 12);
+        CHECK(rNan.expanded == true);
+        CHECK(rNan.matchedOrderIndex == 5);
+        CHECK(rNan.windowItems.size() == 7);
+
+        // 14e. Small 3-item container keeps cache.consecutiveMisses == 0 and stickyFallback == false
+        HUDController::QuickContainerMergeCache smallCache;
+        HUDController::CachedInventorySnapshot smallSnap;
+        smallSnap.ownerFormID = 0x6666u;
+        smallSnap.generation = 1u;
+        smallSnap.items = {
+            mkValItem("Item A", 10, 1.0f),
+            mkValItem("Item B", 20, 1.0f),
+            mkValItem("Item C", 30, 1.0f)
+        };
+        std::vector<HUDController::QuickContainerItemEntry> smallEng = smallSnap.items;
+        for (int frame = 0; frame < 5; ++frame) {
+            const auto& rSmall = HUDController::ResolveMergedQuickContainerWindow(
+                smallCache, 0x6666u, smallSnap, smallEng, 0, 12, true);
+            CHECK(rSmall.expanded == false);
+            CHECK(rSmall.totalItemCount == 3);
+            CHECK(smallCache.consecutiveMisses == 0);
+            CHECK(smallCache.stickyFallback == false);
         }
     }
 

@@ -221,6 +221,30 @@ int main()
         CHECK(TargetInfo::ResolveTranslationFallback("  $Take  ") == "TAKE");
     }
 
+    // 10. ResolveLoadDoorDestination resolves cell, worldspace, ExtraTeleportName, and locked multi-line doors
+    {
+        // Interior cell name when rollover is generic or empty
+        CHECK(TargetInfo::ResolveLoadDoorDestination("", "Door", "Concord Speakeasy", "") == "Concord Speakeasy");
+        CHECK(TargetInfo::ResolveLoadDoorDestination("Door", "Door", "Vault 111", "") == "Vault 111");
+        CHECK(TargetInfo::ResolveLoadDoorDestination("Metal Door", "Metal Door", "Vault 111", "") == "Vault 111");
+
+        // Exterior worldspace name ("Commonwealth")
+        CHECK(TargetInfo::ResolveLoadDoorDestination("", "Door", "", "Commonwealth") == "Commonwealth");
+        CHECK(TargetInfo::ResolveLoadDoorDestination("Commonwealth", "Door", "", "Commonwealth") == "Commonwealth");
+
+        // Custom ExtraTeleportName override via rollover
+        CHECK(TargetInfo::ResolveLoadDoorDestination("Exit to Sanctuary", "Door", "SanctuaryHills", "Commonwealth") ==
+              "Exit to Sanctuary");
+
+        // Multi-line locked door strips lock tier line cleanly
+        CHECK(TargetInfo::ResolveLoadDoorDestination("Commonwealth\n[Master]", "Metal Door", "", "Commonwealth") ==
+              "Commonwealth");
+        CHECK(TargetInfo::ResolveLoadDoorDestination("Door\n[Novice]", "Door", "Root Cellar", "") ==
+              "Root Cellar");
+        CHECK(TargetInfo::ResolveLoadDoorDestination("Door\n[Master]", "Door", "", "").empty());
+        CHECK(TargetInfo::ResolveLoadDoorDestination("Metal Door", "Metal Door", "", "").empty());
+    }
+
     std::cout << "[TEST] test_target_info PASSED" << std::endl;
     return 0;
 }

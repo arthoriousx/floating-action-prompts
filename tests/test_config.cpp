@@ -45,6 +45,7 @@ int main()
         CHECK_NEAR(snap.modernOpacity, 0.85f, 0.0001f);
         CHECK(snap.inlineItemInfo == false);
         CHECK(snap.modernTextMode == 0);
+        CHECK(snap.showDoorDestination == true);
         CHECK(snap.cleanSorterTags == true);
         CHECK_NEAR(snap.modernBgOpacity, 0.0f, 0.0001f);
         CHECK(snap.modernBorder == false);
@@ -222,6 +223,7 @@ int main()
         edit.coloredCategoryIcons = true;
         edit.inlineItemInfo = true;
         edit.modernTextMode = 2;
+        edit.showDoorDestination = false;
         edit.cleanSorterTags = false;
         edit.modernBgOpacity = 0.45f;
         edit.modernBorder = true;
@@ -284,6 +286,7 @@ int main()
         CHECK(loaded.coloredCategoryIcons == true);
         CHECK(loaded.inlineItemInfo == true);
         CHECK(loaded.modernTextMode == 2);
+        CHECK(loaded.showDoorDestination == false);
         CHECK(loaded.cleanSorterTags == false);
         CHECK_NEAR(loaded.modernBgOpacity, 0.45f, 0.0001f);
         CHECK(loaded.modernBorder == true);
