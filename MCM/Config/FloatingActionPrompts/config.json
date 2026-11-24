@@ -43,6 +43,35 @@
           "text": "Screen Edge Margin (px)",
           "help": "Safe padding in pixels from screen borders when clamping is enabled.",
           "valueOptions": { "min": 0, "max": 400, "step": 5, "sourceType": "ModSettingFloat" }
+        },
+        { "type": "section", "text": "Companion Prompts" },
+        {
+          "type": "switcher",
+          "id": "bLimitCompanionPromptDistance:General",
+          "text": "Limit Companion Prompt Distance",
+          "help": "Limit the interaction range of active companions and followers so distant prompts do not clutter your crosshair.",
+          "valueOptions": { "sourceType": "ModSettingBool" }
+        },
+        {
+          "type": "slider",
+          "id": "fCompanionMaxDistance:General",
+          "text": "Max Companion Distance (units)",
+          "help": "Maximum distance in game units at which companion prompts appear outside combat (vanilla interaction range is 180).",
+          "valueOptions": { "min": 50, "max": 500, "step": 10, "sourceType": "ModSettingFloat" }
+        },
+        {
+          "type": "slider",
+          "id": "fCompanionCombatMaxDistance:General",
+          "text": "Combat Max Distance (0 = Hide)",
+          "help": "Maximum distance for companion prompts during combat. Set to 0 to hide/block companion prompts in combat (Revive/Stimpak always remains available).",
+          "valueOptions": { "min": 0, "max": 500, "step": 10, "sourceType": "ModSettingFloat" }
+        },
+        {
+          "type": "switcher",
+          "id": "bCompanionDeprioritizeLoot:General",
+          "text": "Prevent Companion Loot Focus Steal (Requires Limit)",
+          "help": "Requires Limit Companion Prompt Distance. Eliminates the wide companion pick radius and stops nearby companions from stealing crosshair focus while looting containers.",
+          "valueOptions": { "sourceType": "ModSettingBool" }
         }
       ]
     },

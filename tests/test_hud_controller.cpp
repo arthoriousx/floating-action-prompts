@@ -1157,6 +1157,641 @@ int main()
         }
     }
 
+    // 15. MSVC _stricmp ordering ('[' < 'a'..'z') for tagged/untagged dead NPCs, unequipped-first, and Weight ASC
+    {
+        auto mkNpcItem = [](
+            std::string_view a_name,
+            std::uint32_t a_value,
+            float a_weight,
+            TargetInfo::ItemKind a_kind,
+            std::uint32_t a_count,
+            bool a_equipped)
+        {
+            HUDController::QuickContainerItemEntry e;
+            e.name = std::string(a_name);
+            e.count = a_count;
+            e.itemKind = a_kind;
+            e.value = a_value;
+            e.weight = a_weight;
+            e.isEquipped = a_equipped;
+            return e;
+        };
+
+        // 15a. Dead NPC mixing FIS [Tag] items ('[' = 91) and untagged Uppercase items ('A'..'Z' vs _stricmp 'a'..'z')
+        std::vector<HUDController::QuickContainerItemEntry> npcInv{
+            mkNpcItem("Harness", 10, 1.0f, TargetInfo::ItemKind::Armor, 1u, true),
+            mkNpcItem("[Drink] Lipton Tea Box", 15, 0.5f, TargetInfo::ItemKind::Aid, 1u, false),
+            mkNpcItem("Combat Armor Left Arm", 40, 3.0f, TargetInfo::ItemKind::Armor, 1u, false),
+            mkNpcItem("[Ammo] 4.7mm Caseless Round", 1, 0.0f, TargetInfo::ItemKind::Ammo, 13u, false),
+            mkNpcItem("Grease Rat Outfit", 35, 2.0f, TargetInfo::ItemKind::Armor, 1u, true),
+            mkNpcItem("[Ammo] .357 Magnum", 3, 0.0f, TargetInfo::ItemKind::Ammo, 11u, false),
+            mkNpcItem("[Torso] Raider Chest Piece", 25, 7.0f, TargetInfo::ItemKind::Armor, 1u, true),
+            mkNpcItem("[Ammo] .30 Carbine", 2, 0.0f, TargetInfo::ItemKind::Ammo, 13u, false)
+        };
+        std::vector<HUDController::QuickContainerItemEntry> engNpcTop{
+            mkNpcItem("[Ammo] .30 Carbine", 2, 0.0f, TargetInfo::ItemKind::Ammo, 13u, false),
+            mkNpcItem("[Ammo] .357 Magnum", 3, 0.0f, TargetInfo::ItemKind::Ammo, 11u, false),
+            mkNpcItem("[Ammo] 4.7mm Caseless Round", 1, 0.0f, TargetInfo::ItemKind::Ammo, 13u, false),
+            mkNpcItem("[Drink] Lipton Tea Box", 15, 0.5f, TargetInfo::ItemKind::Aid, 1u, false),
+            mkNpcItem("...", 1, 0.0f, TargetInfo::ItemKind::None, 1u, false)
+        };
+        const auto rNpc = HUDController::MergeQuickContainerInventory(engNpcTop, 0, npcInv, 12);
+        CHECK(rNpc.expanded == true);
+        CHECK(rNpc.matchedOrderIndex == 2);
+        CHECK(rNpc.totalItemCount == 8);
+        CHECK(rNpc.windowItems.size() == 8);
+        CHECK(rNpc.windowItems[0].name == "[Ammo] .30 Carbine");
+        CHECK(rNpc.windowItems[4].name == "[Torso] Raider Chest Piece");
+        CHECK(rNpc.windowItems[5].name == "Combat Armor Left Arm");
+
+        // 15b. Digit/dot prefix tie places '[Drink] Lipton Tea Box' (ASCII 91) before 'Harness' ('h' = 104) under _stricmp
+        std::vector<HUDController::QuickContainerItemEntry> prefixTieInv{
+            mkNpcItem(".30 Carbine", 2, 0.0f, TargetInfo::ItemKind::Ammo, 13u, false),
+            mkNpcItem(".357 Magnum", 3, 0.0f, TargetInfo::ItemKind::Ammo, 11u, false),
+            mkNpcItem("4.7mm Caseless Round", 1, 0.0f, TargetInfo::ItemKind::Ammo, 13u, false),
+            mkNpcItem("5.56 Round", 2, 0.0f, TargetInfo::ItemKind::Ammo, 10u, false),
+            mkNpcItem("Harness", 10, 1.0f, TargetInfo::ItemKind::Armor, 1u, true),
+            mkNpcItem("[Drink] Lipton Tea Box", 15, 0.5f, TargetInfo::ItemKind::Aid, 1u, false)
+        };
+        std::vector<HUDController::QuickContainerItemEntry> prefixTieEng{
+            mkNpcItem(".30 Carbine", 2, 0.0f, TargetInfo::ItemKind::Ammo, 13u, false),
+            mkNpcItem(".357 Magnum", 3, 0.0f, TargetInfo::ItemKind::Ammo, 11u, false),
+            mkNpcItem("4.7mm Caseless Round", 1, 0.0f, TargetInfo::ItemKind::Ammo, 13u, false),
+            mkNpcItem("5.56 Round", 2, 0.0f, TargetInfo::ItemKind::Ammo, 10u, false),
+            mkNpcItem("...", 1, 0.0f, TargetInfo::ItemKind::None, 1u, false)
+        };
+        const auto rPrefixTie = HUDController::MergeQuickContainerInventory(prefixTieEng, 0, prefixTieInv, 12);
+        CHECK(rPrefixTie.expanded == true);
+        CHECK(rPrefixTie.matchedOrderIndex == 2);
+        CHECK(rPrefixTie.windowItems.size() == 6);
+        CHECK(rPrefixTie.windowItems[4].name == "[Drink] Lipton Tea Box");
+        CHECK(rPrefixTie.windowItems[5].name == "Harness");
+
+        // 15c. Unequipped-before-equipped ordering (order 12) and Weight ASC ordering (order 13)
+        std::vector<HUDController::QuickContainerItemEntry> eqInv{
+            mkNpcItem("Alpha Armor", 10, 5.0f, TargetInfo::ItemKind::Armor, 1u, true),
+            mkNpcItem("Beta Helmet", 20, 2.0f, TargetInfo::ItemKind::Armor, 1u, true),
+            mkNpcItem("[Ammo] 10mm Round", 2, 0.0f, TargetInfo::ItemKind::Ammo, 20u, false),
+            mkNpcItem("Pipe Rifle", 25, 4.0f, TargetInfo::ItemKind::Weapon, 1u, false),
+            mkNpcItem("Combat Armor", 45, 3.0f, TargetInfo::ItemKind::Armor, 1u, false),
+            mkNpcItem("Stimpak", 48, 0.1f, TargetInfo::ItemKind::Aid, 2u, false)
+        };
+        std::vector<HUDController::QuickContainerItemEntry> engEq{
+            mkNpcItem("[Ammo] 10mm Round", 2, 0.0f, TargetInfo::ItemKind::Ammo, 20u, false),
+            mkNpcItem("Combat Armor", 45, 3.0f, TargetInfo::ItemKind::Armor, 1u, false),
+            mkNpcItem("Pipe Rifle", 25, 4.0f, TargetInfo::ItemKind::Weapon, 1u, false),
+            mkNpcItem("Stimpak", 48, 0.1f, TargetInfo::ItemKind::Aid, 2u, false),
+            mkNpcItem("...", 1, 0.0f, TargetInfo::ItemKind::None, 1u, false)
+        };
+        const auto rEq = HUDController::MergeQuickContainerInventory(engEq, 0, eqInv, 12);
+        CHECK(rEq.expanded == true);
+        CHECK(rEq.matchedOrderIndex == 12);
+        CHECK(rEq.windowItems.size() == 6);
+        CHECK(rEq.windowItems[4].name == "Alpha Armor");
+        CHECK(rEq.windowItems[5].name == "Beta Helmet");
+
+        std::vector<HUDController::QuickContainerItemEntry> wtAscInv{
+            mkNpcItem("Heavy Armor", 50, 7.0f, TargetInfo::ItemKind::Armor, 1u, false),
+            mkNpcItem("Light Aid", 15, 0.1f, TargetInfo::ItemKind::Aid, 1u, false),
+            mkNpcItem("One Pound Tool", 40, 1.0f, TargetInfo::ItemKind::MiscJunk, 1u, false),
+            mkNpcItem("Zero Weight Ammo", 2, 0.0f, TargetInfo::ItemKind::Ammo, 10u, false),
+            mkNpcItem("Medium Rifle", 120, 3.0f, TargetInfo::ItemKind::Weapon, 1u, false),
+            mkNpcItem("Half Pound Cup", 5, 0.5f, TargetInfo::ItemKind::MiscJunk, 1u, false)
+        };
+        std::vector<HUDController::QuickContainerItemEntry> engWtAsc{
+            mkNpcItem("Zero Weight Ammo", 2, 0.0f, TargetInfo::ItemKind::Ammo, 10u, false),
+            mkNpcItem("Light Aid", 15, 0.1f, TargetInfo::ItemKind::Aid, 1u, false),
+            mkNpcItem("Half Pound Cup", 5, 0.5f, TargetInfo::ItemKind::MiscJunk, 1u, false),
+            mkNpcItem("One Pound Tool", 40, 1.0f, TargetInfo::ItemKind::MiscJunk, 1u, false),
+            mkNpcItem("...", 1, 0.0f, TargetInfo::ItemKind::None, 1u, false)
+        };
+        const auto rWtAsc = HUDController::MergeQuickContainerInventory(engWtAsc, 0, wtAscInv, 12);
+        CHECK(rWtAsc.expanded == true);
+        CHECK(rWtAsc.matchedOrderIndex == 13);
+        CHECK(rWtAsc.windowItems.size() == 6);
+        CHECK(rWtAsc.windowItems[4].name == "Medium Rifle");
+        CHECK(rWtAsc.windowItems[5].name == "Heavy Armor");
+    }
+
+    // 16. Fallout 4 native corpse QuickContainer category order (Key->Book->Holo->Ammo->Aid->Weap->Misc->Armor) + priority bubbling
+    {
+        auto mkCorpseItem = [](
+            std::string_view a_name,
+            std::uint32_t a_value,
+            float a_weight,
+            TargetInfo::ItemKind a_kind,
+            std::uint32_t a_count = 1u,
+            bool a_equipped = false,
+            bool a_better = false,
+            bool a_tagged = false)
+        {
+            HUDController::QuickContainerItemEntry e;
+            e.name = std::string(a_name);
+            e.count = a_count;
+            e.itemKind = a_kind;
+            e.value = a_value;
+            e.weight = a_weight;
+            e.isEquipped = a_equipped;
+            e.isBetterThanEquipped = a_better;
+            e.isTaggedForSearch = a_tagged;
+            return e;
+        };
+
+        // 16a. GLOWING ONE: Ammo -> Aid (Value DESC) -> MiscJunk (Value DESC) selects candidate 14 on Frame 0 (no scroll swap)
+        {
+            std::vector<HUDController::QuickContainerItemEntry> glowingInv{
+                mkCorpseItem("[Ammo] .303 British", 2, 0.0f, TargetInfo::ItemKind::Ammo, 1u),
+                mkCorpseItem("[Chem] Irradiated Blood", 50, 0.5f, TargetInfo::ItemKind::Aid, 2u),
+                mkCorpseItem("[Food] Bullion Cubes Tin", 24, 0.5f, TargetInfo::ItemKind::Aid, 1u),
+                mkCorpseItem("[RadFood] Tuna", 18, 0.5f, TargetInfo::ItemKind::Aid, 1u),
+                mkCorpseItem("[Resource] Nuclear Material", 10, 1.0f, TargetInfo::ItemKind::MiscJunk, 1u),
+                mkCorpseItem("[Scrap] Match Box", 20, 0.4f, TargetInfo::ItemKind::MiscJunk, 1u)
+            };
+            std::vector<HUDController::QuickContainerItemEntry> engFrame0{
+                mkCorpseItem("[Ammo] .303 British", 2, 0.0f, TargetInfo::ItemKind::Ammo, 1u),
+                mkCorpseItem("[Chem] Irradiated Blood", 50, 0.5f, TargetInfo::ItemKind::Aid, 2u),
+                mkCorpseItem("[Food] Bullion Cubes Tin", 24, 0.5f, TargetInfo::ItemKind::Aid, 1u),
+                mkCorpseItem("[RadFood] Tuna", 18, 0.5f, TargetInfo::ItemKind::Aid, 1u),
+                mkCorpseItem("...", 1, 0.0f, TargetInfo::ItemKind::None, 1u)
+            };
+            HUDController::QuickContainerMergeCache cache;
+            HUDController::CachedInventorySnapshot snap;
+            snap.ownerFormID = 0x7001u;
+            snap.generation = 1u;
+            snap.items = glowingInv;
+
+            const auto& r0 = HUDController::ResolveMergedQuickContainerWindow(
+                cache, 0x7001u, snap, engFrame0, 0, 12, true);
+            CHECK(r0.expanded == true);
+            CHECK(r0.matchedOrderIndex == 14);
+            CHECK(r0.totalItemCount == 6);
+            CHECK(r0.windowItems.size() == 6);
+            CHECK(r0.windowItems[4].name == "[Scrap] Match Box");
+            CHECK(r0.windowItems[5].name == "[Resource] Nuclear Material");
+
+            // Scrolling to bottom (Match Box before Nuclear Material) keeps candidate 14 seamlessly
+            std::vector<HUDController::QuickContainerItemEntry> engBottom{
+                mkCorpseItem("[Chem] Irradiated Blood", 50, 0.5f, TargetInfo::ItemKind::Aid, 2u),
+                mkCorpseItem("[Food] Bullion Cubes Tin", 24, 0.5f, TargetInfo::ItemKind::Aid, 1u),
+                mkCorpseItem("[RadFood] Tuna", 18, 0.5f, TargetInfo::ItemKind::Aid, 1u),
+                mkCorpseItem("[Scrap] Match Box", 20, 0.4f, TargetInfo::ItemKind::MiscJunk, 1u),
+                mkCorpseItem("[Resource] Nuclear Material", 10, 1.0f, TargetInfo::ItemKind::MiscJunk, 1u)
+            };
+            const auto& rScroll = HUDController::ResolveMergedQuickContainerWindow(
+                cache, 0x7001u, snap, engBottom, 4, 12, true);
+            CHECK(rScroll.expanded == true);
+            CHECK(rScroll.matchedOrderIndex == 14);
+            CHECK(rScroll.windowItems[4].name == "[Scrap] Match Box");
+            CHECK(rScroll.windowItems[5].name == "[Resource] Nuclear Material");
+        }
+
+        // 16b. RAIDER #1: Aid -> Weapon -> MiscJunk (Value DESC) -> Armor expands 14 items cleanly
+        {
+            std::vector<HUDController::QuickContainerItemEntry> raiderInv{
+                mkCorpseItem("Wastelander Coat", 125, 3.0f, TargetInfo::ItemKind::Armor, 1u, true),
+                mkCorpseItem("White Bottle", 2, 0.5f, TargetInfo::ItemKind::MiscJunk, 1u),
+                mkCorpseItem("Freshly Baked Bread", 18, 0.5f, TargetInfo::ItemKind::Aid, 1u),
+                mkCorpseItem("Short .357 Cattleman Revolver", 150, 3.5f, TargetInfo::ItemKind::Weapon, 1u),
+                mkCorpseItem("Spark Plug", 50, 0.3f, TargetInfo::ItemKind::MiscJunk, 1u),
+                mkCorpseItem("Canned Oranges", 25, 0.5f, TargetInfo::ItemKind::Aid, 1u),
+                mkCorpseItem("Click Master 2000", 123, 1.1f, TargetInfo::ItemKind::MiscJunk, 1u),
+                mkCorpseItem("Duct Tape", 12, 0.1f, TargetInfo::ItemKind::MiscJunk, 1u),
+                mkCorpseItem("Mutant Crisps", 12, 0.5f, TargetInfo::ItemKind::Aid, 1u),
+                mkCorpseItem("Radscorpion Stinger", 30, 0.5f, TargetInfo::ItemKind::MiscJunk, 1u),
+                mkCorpseItem("Flip Lighter", 12, 0.5f, TargetInfo::ItemKind::MiscJunk, 1u),
+                mkCorpseItem("Dog Wood", 20, 1.0f, TargetInfo::ItemKind::MiscJunk, 1u),
+                mkCorpseItem("Pack of Cigarettes", 12, 0.1f, TargetInfo::ItemKind::MiscJunk, 1u),
+                mkCorpseItem("Tea Leaf Ride", 6, 0.5f, TargetInfo::ItemKind::MiscJunk, 1u)
+            };
+            std::vector<HUDController::QuickContainerItemEntry> engRaiderTop{
+                mkCorpseItem("Canned Oranges", 25, 0.5f, TargetInfo::ItemKind::Aid, 1u),
+                mkCorpseItem("Freshly Baked Bread", 18, 0.5f, TargetInfo::ItemKind::Aid, 1u),
+                mkCorpseItem("Mutant Crisps", 12, 0.5f, TargetInfo::ItemKind::Aid, 1u),
+                mkCorpseItem("Short .357 Cattleman Revolver", 150, 3.5f, TargetInfo::ItemKind::Weapon, 1u),
+                mkCorpseItem("...", 1, 0.0f, TargetInfo::ItemKind::None, 1u)
+            };
+            const auto rRaider = HUDController::MergeQuickContainerInventory(engRaiderTop, 0, raiderInv, 12);
+            CHECK(rRaider.expanded == true);
+            CHECK(rRaider.matchedOrderIndex == 14);
+            CHECK(rRaider.totalItemCount == 14);
+            CHECK(rRaider.windowItems.size() == 12);
+            CHECK(rRaider.windowItems[4].name == "Click Master 2000");
+            CHECK(rRaider.windowItems[11].name == "Tea Leaf Ride");
+        }
+
+        // 16c. SPARTANIUS RADAI: Aid -> Weapon -> Armor with FallUI auto-tags present only in Scaleform
+        {
+            std::vector<HUDController::QuickContainerItemEntry> spartInv{
+                mkCorpseItem("Spartan Junkspear", 25, 2.0f, TargetInfo::ItemKind::Weapon, 1u, false),
+                mkCorpseItem("Junk Spartan Helm", 100, 4.0f, TargetInfo::ItemKind::Armor, 1u, true),
+                mkCorpseItem("Junk Legion Underarmour", 5, 3.0f, TargetInfo::ItemKind::Armor, 1u, true),
+                mkCorpseItem("[Vegetables] Corn", 6, 0.1f, TargetInfo::ItemKind::Aid, 1u, false),
+                mkCorpseItem("Junk Spartan Cape", 50, 3.0f, TargetInfo::ItemKind::Armor, 1u, true),
+                mkCorpseItem("[PipeRevolver] Pipe Pistol", 20, 2.35f, TargetInfo::ItemKind::Weapon, 1u, false)
+            };
+            std::vector<HUDController::QuickContainerItemEntry> engSpart{
+                mkCorpseItem("[Vegetables] Corn", 0, 0.0f, TargetInfo::ItemKind::None, 1u, false),
+                mkCorpseItem("[Ranged] Spartan Junkspear", 0, 0.0f, TargetInfo::ItemKind::None, 1u, false),
+                mkCorpseItem("[PipeRevolver] Pipe Pistol", 0, 0.0f, TargetInfo::ItemKind::None, 1u, false),
+                mkCorpseItem("[Helm] Junk Spartan Helm", 0, 0.0f, TargetInfo::ItemKind::None, 1u, true),
+                mkCorpseItem("...", 0, 0.0f, TargetInfo::ItemKind::None, 1u, false)
+            };
+            const auto rSpart = HUDController::MergeQuickContainerInventory(engSpart, 0, spartInv, 12);
+            CHECK(rSpart.expanded == true);
+            CHECK(rSpart.matchedOrderIndex == 14);
+            CHECK(rSpart.totalItemCount == 6);
+            CHECK(rSpart.windowItems.size() == 6);
+            CHECK(rSpart.windowItems[4].name == "Junk Spartan Cape");
+            CHECK(rSpart.windowItems[5].name == "Junk Legion Underarmour");
+        }
+
+        // 16d. ZENVRIA SPARTINA: priority-flagged Armor (isBetterThanEquipped / isTaggedForSearch) bubbles to #0
+        {
+            std::vector<HUDController::QuickContainerItemEntry> zenvInv{
+                mkCorpseItem("[SuperSledge] Spartan Junkspear", 25, 2.0f, TargetInfo::ItemKind::Weapon, 1u, false),
+                mkCorpseItem("Junk Legion Underarmour", 5, 3.0f, TargetInfo::ItemKind::Armor, 1u, true),
+                mkCorpseItem("Junk Legion Helm", 30, 2.0f, TargetInfo::ItemKind::Armor, 1u, true),
+                mkCorpseItem("Smiling Spartan Gas Mask", 15, 3.0f, TargetInfo::ItemKind::Armor, 1u, true),
+                mkCorpseItem("[Food] Dutch Chocolate Tin", 60, 1.0f, TargetInfo::ItemKind::Aid, 1u, false),
+                mkCorpseItem("[10mm] 10mm Pistol", 50, 3.53f, TargetInfo::ItemKind::Weapon, 1u, false)
+            };
+
+            // BGSInventoryList tiebreak within Weapon (candidate 18): Spartan Junkspear before 10mm Pistol
+            std::vector<HUDController::QuickContainerItemEntry> engZenv18{
+                mkCorpseItem("[FullGasMask] Smiling Spartan Gas Mask", 0, 0.0f, TargetInfo::ItemKind::None, 1u, true, true, false),
+                mkCorpseItem("[Food] Dutch Chocolate Tin", 0, 0.0f, TargetInfo::ItemKind::None, 1u, false),
+                mkCorpseItem("[SuperSledge] Spartan Junkspear", 0, 0.0f, TargetInfo::ItemKind::None, 1u, false),
+                mkCorpseItem("[10mm] 10mm Pistol", 0, 0.0f, TargetInfo::ItemKind::None, 1u, false),
+                mkCorpseItem("...", 0, 0.0f, TargetInfo::ItemKind::None, 1u, false)
+            };
+            const auto rZenv18 = HUDController::MergeQuickContainerInventory(engZenv18, 0, zenvInv, 12);
+            CHECK(rZenv18.expanded == true);
+            CHECK(rZenv18.matchedOrderIndex == 18);
+            CHECK(rZenv18.totalItemCount == 6);
+            CHECK(rZenv18.windowItems.size() == 6);
+            CHECK(rZenv18.windowItems[0].isBetterThanEquipped == true);
+            CHECK(rZenv18.windowItems[4].name == "Junk Legion Underarmour");
+            CHECK(rZenv18.windowItems[5].name == "Junk Legion Helm");
+
+            // Value DESC tiebreak within Weapon & Armor (candidate 17)
+            std::vector<HUDController::QuickContainerItemEntry> engZenv17{
+                mkCorpseItem("[FullGasMask] Smiling Spartan Gas Mask", 0, 0.0f, TargetInfo::ItemKind::None, 1u, true, false, true),
+                mkCorpseItem("[Food] Dutch Chocolate Tin", 0, 0.0f, TargetInfo::ItemKind::None, 1u, false),
+                mkCorpseItem("[10mm] 10mm Pistol", 0, 0.0f, TargetInfo::ItemKind::None, 1u, false),
+                mkCorpseItem("[SuperSledge] Spartan Junkspear", 0, 0.0f, TargetInfo::ItemKind::None, 1u, false),
+                mkCorpseItem("...", 0, 0.0f, TargetInfo::ItemKind::None, 1u, false)
+            };
+            const auto rZenv17 = HUDController::MergeQuickContainerInventory(engZenv17, 0, zenvInv, 12);
+            CHECK(rZenv17.expanded == true);
+            CHECK(rZenv17.matchedOrderIndex == 17);
+            CHECK(rZenv17.totalItemCount == 6);
+            CHECK(rZenv17.windowItems.size() == 6);
+            CHECK(rZenv17.windowItems[0].isTaggedForSearch == true);
+            CHECK(rZenv17.windowItems[4].name == "Junk Legion Helm");
+            CHECK(rZenv17.windowItems[5].name == "Junk Legion Underarmour");
+
+            // Scrolling past #0 so priority item leaves the 5-slot engine window must stay expanded
+            HUDController::QuickContainerMergeCache zenvCache;
+            HUDController::CachedInventorySnapshot zenvSnap;
+            zenvSnap.ownerFormID = 0x7002u;
+            zenvSnap.generation = 1u;
+            zenvSnap.items = zenvInv;
+
+            const auto& rz0 = HUDController::ResolveMergedQuickContainerWindow(
+                zenvCache, 0x7002u, zenvSnap, engZenv18, 0, 12, true);
+            CHECK(rz0.expanded == true);
+            CHECK(rz0.matchedOrderIndex == 18);
+            CHECK(rz0.totalItemCount == 6);
+            CHECK(zenvCache.stickyPriorityKeys.size() == 1);
+
+            std::vector<HUDController::QuickContainerItemEntry> engZenvScrolledOut{
+                mkCorpseItem("[Food] Dutch Chocolate Tin", 0, 0.0f, TargetInfo::ItemKind::None, 1u, false),
+                mkCorpseItem("[SuperSledge] Spartan Junkspear", 0, 0.0f, TargetInfo::ItemKind::None, 1u, false),
+                mkCorpseItem("[10mm] 10mm Pistol", 0, 0.0f, TargetInfo::ItemKind::None, 1u, false),
+                mkCorpseItem("[Underarmor] Junk Legion Underarmour", 0, 0.0f, TargetInfo::ItemKind::None, 1u, true),
+                mkCorpseItem("[Helm] Junk Legion Helm", 0, 0.0f, TargetInfo::ItemKind::None, 1u, true)
+            };
+            const auto& rzScroll = HUDController::ResolveMergedQuickContainerWindow(
+                zenvCache, 0x7002u, zenvSnap, engZenvScrolledOut, 4, 12, true);
+            CHECK(rzScroll.expanded == true);
+            CHECK(rzScroll.matchedOrderIndex == 18);
+            CHECK(rzScroll.totalItemCount == 6);
+            CHECK(rzScroll.windowItems.size() == 6);
+            CHECK(rzScroll.selectedIndex == 5);
+            CHECK(rzScroll.windowItems[0].name == "Smiling Spartan Gas Mask");
+            CHECK(zenvCache.stickyFallback == false);
+
+            // Looting another item while priority item is off-screen preserves priority persistence across invGen
+            HUDController::CachedInventorySnapshot zenvSnap7 = zenvSnap;
+            zenvSnap7.items.push_back(mkCorpseItem("Junk Legion Boots", 20, 2.0f, TargetInfo::ItemKind::Armor, 1u, true));
+            HUDController::QuickContainerMergeCache zenvCache7;
+            zenvSnap7.generation = 1u;
+            const auto& rz7_0 = HUDController::ResolveMergedQuickContainerWindow(
+                zenvCache7, 0x7003u, zenvSnap7, engZenv18, 0, 12, true);
+            CHECK(rz7_0.expanded == true);
+            CHECK(rz7_0.totalItemCount == 7);
+
+            zenvSnap7.generation = 2u;
+            zenvSnap7.items.erase(zenvSnap7.items.begin() + 4); // removes [Food] Dutch Chocolate Tin
+            std::vector<HUDController::QuickContainerItemEntry> engZenvAfterLoot{
+                mkCorpseItem("[SuperSledge] Spartan Junkspear", 0, 0.0f, TargetInfo::ItemKind::None, 1u, false),
+                mkCorpseItem("[10mm] 10mm Pistol", 0, 0.0f, TargetInfo::ItemKind::None, 1u, false),
+                mkCorpseItem("[Underarmor] Junk Legion Underarmour", 0, 0.0f, TargetInfo::ItemKind::None, 1u, true),
+                mkCorpseItem("[Helm] Junk Legion Helm", 0, 0.0f, TargetInfo::ItemKind::None, 1u, true),
+                mkCorpseItem("[Boots] Junk Legion Boots", 0, 0.0f, TargetInfo::ItemKind::None, 1u, true)
+            };
+            const auto& rz7_after = HUDController::ResolveMergedQuickContainerWindow(
+                zenvCache7, 0x7003u, zenvSnap7, engZenvAfterLoot, 3, 12, true);
+            CHECK(rz7_after.expanded == true);
+            CHECK(rz7_after.matchedOrderIndex == 18);
+            CHECK(rz7_after.totalItemCount == 6);
+            CHECK(rz7_after.windowItems.size() == 6);
+            CHECK(rz7_after.windowItems[0].name == "Smiling Spartan Gas Mask");
+            CHECK(zenvCache7.stickyFallback == false);
+        }
+
+        // 16e. NIBBLES THE BRAWLER: single-category bottom slice of multi-category inventory + fallback icon enrichment
+        {
+            auto legendaryHammer = mkCorpseItem(
+                "* Bloodied Hammer", 250, 12.0f, TargetInfo::ItemKind::Weapon, 1u, false);
+            legendaryHammer.isLegendary = true;
+
+            std::vector<HUDController::QuickContainerItemEntry> nibInv{
+                mkCorpseItem("White Bottle", 2, 0.5f, TargetInfo::ItemKind::MiscJunk, 3u),
+                mkCorpseItem("Waste M9", 90, 2.5f, TargetInfo::ItemKind::Weapon, 1u),
+                mkCorpseItem("Shotgun Shell", 3, 0.0f, TargetInfo::ItemKind::Ammo, 3u),
+                mkCorpseItem("Spark Plug", 50, 0.3f, TargetInfo::ItemKind::MiscJunk, 1u),
+                mkCorpseItem("Combat Rifle", 200, 11.0f, TargetInfo::ItemKind::Weapon, 1u),
+                mkCorpseItem("Wallet", 9, 1.0f, TargetInfo::ItemKind::MiscJunk, 1u),
+                mkCorpseItem("Plasma Cartridge", 5, 0.0f, TargetInfo::ItemKind::Ammo, 86u),
+                legendaryHammer,
+                mkCorpseItem("Duct Tape", 12, 0.1f, TargetInfo::ItemKind::MiscJunk, 1u),
+                mkCorpseItem("Submachine Gun", 120, 12.0f, TargetInfo::ItemKind::Weapon, 1u),
+                mkCorpseItem("Radscorpion Stinger", 30, 0.5f, TargetInfo::ItemKind::MiscJunk, 1u),
+                mkCorpseItem("Click Master 2000", 123, 1.1f, TargetInfo::ItemKind::MiscJunk, 1u)
+            };
+            // Bottom-5 window contains ONLY MiscJunk (no "..."), while full inv spans Weapon, Ammo, MiscJunk
+            std::vector<HUDController::QuickContainerItemEntry> engNibBottom{
+                mkCorpseItem("Spark Plug", 50, 0.3f, TargetInfo::ItemKind::MiscJunk, 1u),
+                mkCorpseItem("Radscorpion Stinger", 30, 0.5f, TargetInfo::ItemKind::MiscJunk, 1u),
+                mkCorpseItem("Duct Tape", 12, 0.1f, TargetInfo::ItemKind::MiscJunk, 1u),
+                mkCorpseItem("Wallet", 9, 1.0f, TargetInfo::ItemKind::MiscJunk, 1u),
+                mkCorpseItem("White Bottle", 2, 0.5f, TargetInfo::ItemKind::MiscJunk, 3u)
+            };
+            const auto rNib = HUDController::MergeQuickContainerInventory(
+                engNibBottom, 4, nibInv, 12, -1, 7);
+            CHECK(rNib.expanded == true);
+            CHECK(rNib.matchedOrderIndex == 17);
+            CHECK(rNib.totalItemCount == 12);
+            CHECK(rNib.windowItems.size() == 12);
+            CHECK(rNib.windowItems[0].name == "* Bloodied Hammer");
+            CHECK(rNib.windowItems[0].isLegendary == true);
+            CHECK(rNib.windowItems[1].name == "Plasma Cartridge");
+            CHECK(rNib.windowItems[2].name == "Shotgun Shell");
+            CHECK(rNib.windowItems[3].name == "Combat Rifle");
+            CHECK(rNib.windowItems[6].name == "Click Master 2000");
+
+            // Fallback (!expanded) still enriches ItemKind icons from kindByCleanUpper (e.g., dropped Machete)
+            HUDController::QuickContainerMergeCache fbCache;
+            HUDController::CachedInventorySnapshot fbSnap;
+            fbSnap.ownerFormID = 0x7004u;
+            fbSnap.generation = 1u;
+            fbSnap.items = {
+                mkCorpseItem("Zeta", 10, 1.0f, TargetInfo::ItemKind::MiscJunk, 1u),
+                mkCorpseItem("Machete", 25, 2.0f, TargetInfo::ItemKind::Weapon, 1u),
+                mkCorpseItem("Alpha", 30, 1.0f, TargetInfo::ItemKind::MiscJunk, 1u),
+                mkCorpseItem("Gamma", 15, 1.0f, TargetInfo::ItemKind::MiscJunk, 1u),
+                mkCorpseItem("Beta", 5, 1.0f, TargetInfo::ItemKind::MiscJunk, 1u),
+                mkCorpseItem("Omega", 40, 1.0f, TargetInfo::ItemKind::MiscJunk, 1u)
+            };
+            fbSnap.kindByCleanUpper["MACHETE"] = TargetInfo::ItemKind::Weapon;
+            fbSnap.kindByCleanUpper["ALPHA"] = TargetInfo::ItemKind::MiscJunk;
+            std::vector<HUDController::QuickContainerItemEntry> engCustomFb{
+                mkCorpseItem("[Melee] Machete", 0, 0.0f, TargetInfo::ItemKind::None, 1u),
+                mkCorpseItem("Beta", 0, 0.0f, TargetInfo::ItemKind::None, 1u),
+                mkCorpseItem("Omega", 0, 0.0f, TargetInfo::ItemKind::None, 1u),
+                mkCorpseItem("Zeta", 0, 0.0f, TargetInfo::ItemKind::None, 1u),
+                mkCorpseItem("...", 0, 0.0f, TargetInfo::ItemKind::None, 1u)
+            };
+            const auto& rFb = HUDController::ResolveMergedQuickContainerWindow(
+                fbCache, 0x7004u, fbSnap, engCustomFb, 0, 12, true);
+            CHECK(rFb.expanded == false);
+            CHECK(rFb.windowItems.size() == 4);
+            CHECK(rFb.windowItems[0].itemKind == TargetInfo::ItemKind::Weapon);
+        }
+    }
+
+    // 17. Companion prompt distance filter, loot protection, heal/command exceptions, and HUD suppression
+    {
+        // 17a. IsHealActionVerb case-insensitive matching
+        CHECK(HUDController::IsHealActionVerb("HEAL"));
+        CHECK(HUDController::IsHealActionVerb("Heal"));
+        CHECK(HUDController::IsHealActionVerb("Use Stimpak"));
+        CHECK(HUDController::IsHealActionVerb("STIMPAK"));
+        CHECK(HUDController::IsHealActionVerb("Revive"));
+        CHECK(!HUDController::IsHealActionVerb("TALK"));
+        CHECK(!HUDController::IsHealActionVerb("COMMAND"));
+        CHECK(!HUDController::IsHealActionVerb("TRADE"));
+        CHECK(!HUDController::IsHealActionVerb(""));
+
+        // 17b. Disabled limit or active Command Mode restores vanilla engine settings and never suppresses
+        {
+            HUDController::CompanionFilterInput in{};
+            in.limitEnabled = false;
+            in.targetIsLiveCompanion = true;
+            in.targetDistance = 400.0f;
+            in.vanillaCommandPickDistance = 2000.0f;
+            in.vanillaCommandPickRadius = 24.0f;
+            const auto dOff = HUDController::EvaluateCompanionFilter(in);
+            CHECK(!dOff.suppressTarget);
+            CHECK(dOff.restoreVanillaSettings);
+            CHECK_NEAR(dOff.desiredCommandPickDistance, 2000.0f, 0.01f);
+            CHECK_NEAR(dOff.desiredCommandPickRadius, 24.0f, 0.01f);
+
+            in.limitEnabled = true;
+            in.inCommandMode = true;
+            const auto dCmd = HUDController::EvaluateCompanionFilter(in);
+            CHECK(!dCmd.suppressTarget);
+            CHECK(dCmd.restoreVanillaSettings);
+            CHECK_NEAR(dCmd.desiredCommandPickDistance, 2000.0f, 0.01f);
+            CHECK_NEAR(dCmd.desiredCommandPickRadius, 24.0f, 0.01f);
+        }
+
+        // 17c. Out-of-combat distance filtering & deprioritize radius clamping
+        {
+            HUDController::CompanionFilterInput in{};
+            in.limitEnabled = true;
+            in.deprioritizeLoot = true;
+            in.maxDistance = 160.0f;
+            in.combatMaxDistance = 80.0f;
+            in.vanillaCommandPickDistance = 2000.0f;
+            in.vanillaCommandPickRadius = 24.0f;
+            in.vanillaActivatePickRadius = 16.0f;
+            in.targetIsLiveCompanion = true;
+
+            in.targetDistance = 150.0f;
+            const auto dNear = HUDController::EvaluateCompanionFilter(in);
+            CHECK(!dNear.suppressTarget);
+            CHECK(!dNear.restoreVanillaSettings);
+            CHECK_NEAR(dNear.desiredCommandPickDistance, 160.0f, 0.01f);
+            CHECK_NEAR(dNear.desiredCommandPickRadius, 16.0f, 0.01f);
+
+            in.targetDistance = 161.0f;
+            const auto dFar = HUDController::EvaluateCompanionFilter(in);
+            CHECK(dFar.suppressTarget);
+            CHECK_NEAR(dFar.desiredCommandPickDistance, 160.0f, 0.01f);
+            CHECK_NEAR(dFar.desiredCommandPickRadius, 16.0f, 0.01f);
+
+            // Without deprioritizeLoot, vanilla command radius is preserved
+            in.deprioritizeLoot = false;
+            in.targetDistance = 100.0f;
+            const auto dNoDeprio = HUDController::EvaluateCompanionFilter(in);
+            CHECK(!dNoDeprio.suppressTarget);
+            CHECK_NEAR(dNoDeprio.desiredCommandPickRadius, 24.0f, 0.01f);
+        }
+
+        // 17d. Combat distance filtering & 0 = hide completely
+        {
+            HUDController::CompanionFilterInput in{};
+            in.limitEnabled = true;
+            in.deprioritizeLoot = true;
+            in.maxDistance = 160.0f;
+            in.combatMaxDistance = 80.0f;
+            in.inCombat = true;
+            in.targetIsLiveCompanion = true;
+
+            in.targetDistance = 75.0f;
+            CHECK(!HUDController::EvaluateCompanionFilter(in).suppressTarget);
+
+            in.targetDistance = 90.0f;
+            const auto dCombatFar = HUDController::EvaluateCompanionFilter(in);
+            CHECK(dCombatFar.suppressTarget);
+            CHECK_NEAR(dCombatFar.desiredCommandPickDistance, 80.0f, 0.01f);
+
+            // Combat max distance = 0 hides even at point-blank range
+            in.combatMaxDistance = 0.0f;
+            in.targetDistance = 20.0f;
+            const auto dCombatZero = HUDController::EvaluateCompanionFilter(in);
+            CHECK(dCombatZero.suppressTarget);
+            CHECK_NEAR(dCombatZero.desiredCommandPickDistance, 0.0f, 0.01f);
+            CHECK_NEAR(dCombatZero.desiredCommandPickRadius, 0.0f, 0.01f);
+        }
+
+        // 17e. Exceptions: bleedout, heal verb, and non-companion (dead/container) are NEVER suppressed
+        {
+            HUDController::CompanionFilterInput in{};
+            in.limitEnabled = true;
+            in.deprioritizeLoot = true;
+            in.inCombat = true;
+            in.combatMaxDistance = 0.0f;
+            in.quickLootProtected = true;
+            in.targetIsLiveCompanion = true;
+            in.targetDistance = 140.0f;
+
+            in.targetIsBleedout = true;
+            CHECK(!HUDController::EvaluateCompanionFilter(in).suppressTarget);
+
+            in.targetIsBleedout = false;
+            in.targetHasHealVerb = true;
+            CHECK(!HUDController::EvaluateCompanionFilter(in).suppressTarget);
+
+            in.targetHasHealVerb = false;
+            in.targetIsLiveCompanion = false; // container or dead companion corpse
+            CHECK(!HUDController::EvaluateCompanionFilter(in).suppressTarget);
+        }
+
+        // 17f. QuickLoot protection & grace window transition state machine
+        {
+            std::int64_t lastQlMs = 0;
+            // Looting a container refreshes timestamp and enables protection
+            CHECK(HUDController::UpdateQuickLootCompanionProtection(lastQlMs, true, false, 1000, 600));
+            CHECK(lastQlMs == 1000);
+
+            // Transition frame: QuickContainer still visible while PickRef flips to companion -> MUST stay protected!
+            CHECK(HUDController::UpdateQuickLootCompanionProtection(lastQlMs, true, true, 1050, 600));
+
+            // Next frames after QuickContainer hides: protected within 600ms, expires after 600ms
+            CHECK(HUDController::UpdateQuickLootCompanionProtection(lastQlMs, false, true, 1600, 600));
+            CHECK(!HUDController::UpdateQuickLootCompanionProtection(lastQlMs, false, true, 1601, 600));
+
+            // Looking away at non-companion resets grace timestamp immediately
+            CHECK(HUDController::UpdateQuickLootCompanionProtection(lastQlMs, true, false, 2000, 600));
+            CHECK(!HUDController::UpdateQuickLootCompanionProtection(lastQlMs, false, false, 2050, 600));
+            CHECK(lastQlMs == 0);
+            CHECK(!HUDController::UpdateQuickLootCompanionProtection(lastQlMs, false, true, 2060, 600));
+
+            HUDController::CompanionFilterInput in{};
+            in.limitEnabled = true;
+            in.deprioritizeLoot = true;
+            in.maxDistance = 160.0f;
+            in.quickLootProtected = true;
+            in.targetIsLiveCompanion = true;
+            in.targetDistance = 50.0f;
+            const auto dLoot = HUDController::EvaluateCompanionFilter(in);
+            CHECK(dLoot.suppressTarget);
+            CHECK_NEAR(dLoot.desiredCommandPickDistance, 0.0f, 0.01f);
+            CHECK_NEAR(dLoot.desiredCommandPickRadius, 0.0f, 0.01f);
+        }
+
+        // 17g. HUDTransformState::Step suppressTarget handling in Vanilla, Modern, and PowerArmor bypass modes
+        {
+            HUDController::HUDTransformState st;
+            HUDController::HUDFrameInput in{};
+            in.enabled = true;
+            in.rolloverVisible = true;
+            in.nativeClipVisible = true;
+            in.hasTarget = true;
+            in.currentClipX = 640.0f;
+            in.currentClipY = 360.0f;
+            in.projectedTarget = { 450.0f, 220.0f, 1.0f, true };
+            in.smoothingSpeed = 1.0f;
+
+            // Float normally at 150u, then step back to 165u -> suppressTarget restores baseline pos & hides alpha
+            const auto floatOut = st.Step(in);
+            CHECK(floatOut.action == HUDController::HUDAction::kApplyFloat);
+
+            in.suppressTarget = true;
+            const auto supOut = st.Step(in);
+            CHECK(supOut.action == HUDController::HUDAction::kSuppressNative);
+            CHECK(supOut.applyPosition);
+            CHECK(supOut.applyAlpha);
+            CHECK_NEAR(supOut.x, 640.0f, 0.01f);
+            CHECK_NEAR(supOut.y, 360.0f, 0.01f);
+            CHECK_NEAR(supOut.alpha, 0.0f, 0.001f);
+            CHECK(st.IsHidingAlpha());
+
+            // Walk back within range -> alpha restores to 1.0
+            in.suppressTarget = false;
+            const auto resumeOut = st.Step(in);
+            CHECK(resumeOut.action == HUDController::HUDAction::kApplyFloat);
+            CHECK(resumeOut.applyAlpha);
+            CHECK_NEAR(resumeOut.alpha, 1.0f, 0.001f);
+            CHECK(!st.IsHidingAlpha());
+
+            // Power Armor bypass mode: suppressTarget STILL hides alpha, then restores alpha = 1.0 when unsuppressed
+            HUDController::HUDTransformState paSt;
+            HUDController::HUDFrameInput paIn{};
+            paIn.enabled = true;
+            paIn.inPowerArmor = true;
+            paIn.powerArmorBypass = true;
+            paIn.rolloverVisible = true;
+            paIn.nativeClipVisible = true;
+            paIn.hasTarget = true;
+            paIn.suppressTarget = true;
+            const auto paSup = paSt.Step(paIn);
+            CHECK(paSup.action == HUDController::HUDAction::kSuppressNative);
+            CHECK(paSup.applyAlpha);
+            CHECK_NEAR(paSup.alpha, 0.0f, 0.001f);
+
+            paIn.suppressTarget = false;
+            const auto paRestore = paSt.Step(paIn);
+            CHECK(paRestore.action == HUDController::HUDAction::kRestoreBaseline);
+            CHECK(paRestore.applyAlpha);
+            CHECK_NEAR(paRestore.alpha, 1.0f, 0.001f);
+            CHECK(!paSt.IsHidingAlpha());
+        }
+    }
+
     std::cout << "[TEST] test_hud_controller PASSED" << std::endl;
     return 0;
 }

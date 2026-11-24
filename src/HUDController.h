@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -50,8 +51,46 @@ namespace HUDController
         float currentClipY{ 0.0f };
         float currentClipAlpha{ 1.0f };
         bool hideNativeClip{ false };
+        bool suppressTarget{ false };
         float deadzonePx{ 0.0f };
     };
+
+    struct CompanionFilterInput
+    {
+        bool limitEnabled{ true };
+        bool deprioritizeLoot{ true };
+        float maxDistance{ 160.0f };
+        float combatMaxDistance{ 80.0f };
+        bool inCombat{ false };
+        bool inCommandMode{ false };
+        bool quickLootProtected{ false };
+        bool targetIsLiveCompanion{ false };
+        bool targetIsBleedout{ false };
+        bool targetHasHealVerb{ false };
+        float targetDistance{ 0.0f };
+        float vanillaCommandPickDistance{ 2000.0f };
+        float vanillaCommandPickRadius{ 24.0f };
+        float vanillaActivatePickRadius{ 16.0f };
+    };
+
+    struct CompanionFilterDecision
+    {
+        bool suppressTarget{ false };
+        bool restoreVanillaSettings{ false };
+        float desiredCommandPickDistance{ 2000.0f };
+        float desiredCommandPickRadius{ 24.0f };
+    };
+
+    inline constexpr std::int64_t kQuickLootCompanionGraceMs = 600;
+
+    [[nodiscard]] bool IsHealActionVerb(std::string_view a_verb) noexcept;
+    [[nodiscard]] bool UpdateQuickLootCompanionProtection(
+        std::int64_t& a_lastQuickLootActiveMs,
+        bool a_quickContainerVisible,
+        bool a_targetIsLiveCompanion,
+        std::int64_t a_nowMs,
+        std::int64_t a_graceMs = kQuickLootCompanionGraceMs) noexcept;
+    [[nodiscard]] CompanionFilterDecision EvaluateCompanionFilter(const CompanionFilterInput& a_in) noexcept;
 
     struct ButtonHintEntry
     {
@@ -70,6 +109,7 @@ namespace HUDController
         bool isFavorite{ false };
         bool isTaggedForSearch{ false };
         bool isEquipped{ false };
+        bool isBetterThanEquipped{ false };
         TargetInfo::ItemKind itemKind{ TargetInfo::ItemKind::None };
         std::uint64_t stackSignature{ 0 };
         std::uint32_t value{ 0 };
@@ -87,6 +127,7 @@ namespace HUDController
         bool expanded{ false };
         bool hasMoreAbove{ false };
         bool hasMoreBelow{ false };
+        std::vector<std::size_t> matchedPriorityInvIndices;
     };
 
     struct QuickContainerOverlay
@@ -183,7 +224,8 @@ namespace HUDController
         const std::vector<QuickContainerItemEntry>& a_inventoryItems,
         int a_maxVisibleRows,
         int a_preferredOrder = -1,
-        std::int32_t a_prevStart = -1);
+        std::int32_t a_prevStart = -1,
+        const std::vector<std::uint8_t>* a_prioritizedInv = nullptr);
 
     struct CachedInventorySnapshot
     {
@@ -197,6 +239,15 @@ namespace HUDController
         std::uint64_t generation{ 0 };
         std::vector<QuickContainerItemEntry> items;
         std::unordered_map<std::string, TargetInfo::ItemKind> kindByCleanUpper;
+    };
+
+    struct QuickContainerPriorityKey
+    {
+        std::string cleanUpperName;
+        std::uint64_t stackSignature{ 0 };
+        bool isEquipped{ false };
+        bool isFavorite{ false };
+        TargetInfo::ItemKind itemKind{ TargetInfo::ItemKind::None };
     };
 
     struct QuickContainerMergeCache
@@ -214,6 +265,7 @@ namespace HUDController
         bool stickyFallback{ false };
         bool everExpanded{ false };
         int consecutiveMisses{ 0 };
+        std::vector<QuickContainerPriorityKey> stickyPriorityKeys;
         QuickContainerMergeResult result{};
     };
 
@@ -240,6 +292,8 @@ namespace HUDController
 
         void Install();
         void EnsurePickRefSink();
+        void EnsureActivateHook();
+        [[nodiscard]] bool ShouldBlockCompanionActivation() const noexcept;
         void ClearPickedRef();
         void ResetState();
         [[nodiscard]] OverlaySnapshot GetOverlaySnapshot() const;
@@ -285,14 +339,34 @@ namespace HUDController
         void InvalidateQuickContainerCacheInternal();
         void PerformDeferredResets();
         void ClearOverlaySnapshot();
+        void ResolveCompanionEngineSettings();
+        void ApplyCompanionEngineSettings(float a_dist, float a_radius);
+        void RestoreCompanionEngineSettings();
         static void Hook_AdvanceMovie(RE::IMenu* a_this, float a_timeDelta, std::uint64_t a_time);
+        static bool Hook_ActivateShouldHandleEvent(RE::BSInputEventUser* a_this, const RE::InputEvent* a_event);
 
         inline static REL::Relocation<decltype(&Hook_AdvanceMovie)> _AdvanceMovie;
+        inline static std::atomic<std::uintptr_t> _origActivateShouldHandleEvent{ 0 };
         std::atomic<bool> _hooked{ false };
         std::atomic<bool> _installed{ false };
         std::atomic<bool> _pickSinkRegistered{ false };
+        std::atomic<bool> _activateHooked{ false };
+        std::atomic<bool> _activateIsHeldStateHandler{ false };
+        std::atomic<bool> _suppressCompanionActivate{ false };
         std::atomic<bool> _pendingReset{ false };
         std::atomic<bool> _pendingQcInvalidate{ false };
+
+        bool _companionSettingsResolved{ false };
+        RE::Setting* _gmstCommandPickDist{ nullptr };
+        RE::Setting* _iniCommandPickRadius{ nullptr };
+        RE::Setting* _iniActivatePickRadius{ nullptr };
+        bool _hasOrigCommandPickDist{ false };
+        bool _hasOrigCommandPickRadius{ false };
+        bool _hasOrigActivatePickRadius{ false };
+        float _origCommandPickDist{ 2000.0f };
+        float _origCommandPickRadius{ 24.0f };
+        float _origActivatePickRadius{ 16.0f };
+        std::int64_t _lastQuickLootActiveMs{ 0 };
 
         mutable std::mutex _pickMutex;
         RE::ObjectRefHandle _pickedRefHandle{};

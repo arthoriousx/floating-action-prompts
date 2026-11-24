@@ -86,6 +86,7 @@ namespace
         case F4SE::MessagingInterface::kPostLoadGame:
         case F4SE::MessagingInterface::kNewGame:
             HUDController::Controller::GetSingleton().EnsurePickRefSink();
+            HUDController::Controller::GetSingleton().EnsureActivateHook();
             break;
         default:
             break;

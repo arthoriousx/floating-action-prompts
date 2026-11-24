@@ -24,6 +24,10 @@ int main()
         CHECK(snap.powerArmorBypass == true);
         CHECK(snap.enableClamping == true);
         CHECK_NEAR(snap.edgeMargin, 40.0f, 0.0001f);
+        CHECK(snap.limitCompanionPromptDistance == true);
+        CHECK_NEAR(snap.companionMaxDistance, 160.0f, 0.0001f);
+        CHECK_NEAR(snap.companionCombatMaxDistance, 80.0f, 0.0001f);
+        CHECK(snap.companionDeprioritizeLoot == true);
 
         CHECK_NEAR(snap.doorOffset.x, 0.0f, 0.0001f);
         CHECK_NEAR(snap.doorOffset.y, 0.0f, 0.0001f);
@@ -128,6 +132,8 @@ int main()
         ConfigData edit = cfg.GetSnapshot();
         edit.smoothingSpeed = 0.0f;
         edit.edgeMargin = -10.0f;
+        edit.companionMaxDistance = 10.0f;
+        edit.companionCombatMaxDistance = -5.0f;
         edit.doorOffset.z = -35.0f;
         edit.furnitureOffset = { -250.0f, 300.0f, 999.0f };
         edit.promptStyle = 99;
@@ -166,6 +172,14 @@ int main()
         const ConfigData clamped = cfg.GetSnapshot();
         CHECK_NEAR(clamped.smoothingSpeed, 0.05f, 0.0001f);
         CHECK_NEAR(clamped.edgeMargin, 0.0f, 0.0001f);
+        CHECK_NEAR(clamped.companionMaxDistance, 50.0f, 0.0001f);
+        CHECK_NEAR(clamped.companionCombatMaxDistance, 0.0f, 0.0001f);
+
+        edit.companionMaxDistance = 999.0f;
+        edit.companionCombatMaxDistance = 999.0f;
+        cfg.ApplySnapshot(edit, true);
+        CHECK_NEAR(cfg.GetSnapshot().companionMaxDistance, 500.0f, 0.0001f);
+        CHECK_NEAR(cfg.GetSnapshot().companionCombatMaxDistance, 500.0f, 0.0001f);
         CHECK_NEAR(clamped.doorOffset.z, -35.0f, 0.0001f);
         CHECK_NEAR(clamped.furnitureOffset.x, -200.0f, 0.0001f);
         CHECK_NEAR(clamped.furnitureOffset.y, 200.0f, 0.0001f);
@@ -214,6 +228,10 @@ int main()
         const auto tempPath = tempDir / "roundtrip.ini";
         ConfigData edit = cfg.GetSnapshot();
         edit.smoothingSpeed = 0.5f;
+        edit.limitCompanionPromptDistance = false;
+        edit.companionMaxDistance = 240.0f;
+        edit.companionCombatMaxDistance = 40.0f;
+        edit.companionDeprioritizeLoot = false;
         edit.doorOffset.z = -35.0f;
         edit.furnitureOffset = { 1.5f, -3.5f, 12.0f };
         edit.promptStyle = 1;
@@ -275,6 +293,10 @@ int main()
         CHECK(cfg.Load(tempPath));
         const auto loaded = cfg.GetSnapshot();
         CHECK_NEAR(loaded.smoothingSpeed, 0.5f, 0.0001f);
+        CHECK(loaded.limitCompanionPromptDistance == false);
+        CHECK_NEAR(loaded.companionMaxDistance, 240.0f, 0.0001f);
+        CHECK_NEAR(loaded.companionCombatMaxDistance, 40.0f, 0.0001f);
+        CHECK(loaded.companionDeprioritizeLoot == false);
         CHECK_NEAR(loaded.doorOffset.z, -35.0f, 0.0001f);
         CHECK_NEAR(loaded.furnitureOffset.x, 1.5f, 0.0001f);
         CHECK_NEAR(loaded.furnitureOffset.y, -3.5f, 0.0001f);
@@ -402,12 +424,15 @@ int main()
         // 5. Unprefixed hex colors & NaN float sanitization
         {
             std::ofstream f(tempDir / "edge_values.ini");
+            f << "[General]\nfCompanionMaxDistance=nan\nfCompanionCombatMaxDistance=nan\n";
             f << "[Visual]\nuModernBgColor=0E1116\nuModernAccentColor=#F6C86E\nfModernOpacity=nan\n";
             f << "[InfoCard]\nfInfoCardDelaySeconds=nan\n";
             f << "[Offsets]\nfItemOffsetZ=nan\n";
         }
         CHECK(cfg.Load(tempDir / "edge_values.ini"));
         const auto edgeCfg = cfg.GetSnapshot();
+        CHECK_NEAR(edgeCfg.companionMaxDistance, 160.0f, 0.0001f);
+        CHECK_NEAR(edgeCfg.companionCombatMaxDistance, 80.0f, 0.0001f);
         CHECK(edgeCfg.modernBgColor == 0x0E1116u);
         CHECK(edgeCfg.modernAccentColor == 0xF6C86Eu);
         CHECK_NEAR(edgeCfg.modernOpacity, 0.85f, 0.0001f);

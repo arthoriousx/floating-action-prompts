@@ -2607,6 +2607,15 @@ namespace MenuFrameworkUI
             changed |= ImGuiMCP::SliderFloat("Smoothing Speed", &data.smoothingSpeed, 0.05f, 1.0f, "%.2f");
             changed |= ImGuiMCP::SliderFloat("Edge Margin (px)", &data.edgeMargin, 0.0f, 400.0f, "%.0f");
 
+            ImGuiMCP::Separator();
+            ImGuiMCP::Text("Companion Prompts");
+            changed |= ImGuiMCP::Checkbox("Limit Companion Prompt Distance", &data.limitCompanionPromptDistance);
+            if (data.limitCompanionPromptDistance) {
+                changed |= ImGuiMCP::SliderFloat("Max Distance (units)", &data.companionMaxDistance, 50.0f, 500.0f, "%.0f");
+                changed |= ImGuiMCP::SliderFloat("Combat Max Distance (0 = Hide)", &data.companionCombatMaxDistance, 0.0f, 500.0f, "%.0f");
+                changed |= ImGuiMCP::Checkbox("Prevent Companion Stealing Loot Focus", &data.companionDeprioritizeLoot);
+            }
+
             if (changed) {
                 cfg.ApplySnapshot(data, true);
             }

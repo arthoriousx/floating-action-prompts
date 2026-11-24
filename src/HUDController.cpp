@@ -22,6 +22,122 @@
 
 namespace HUDController
 {
+    namespace
+    {
+        [[nodiscard]] constexpr char ToUpperAsciiChar(char a_ch) noexcept
+        {
+            return (a_ch >= 'a' && a_ch <= 'z')
+                ? static_cast<char>(a_ch - ('a' - 'A'))
+                : a_ch;
+        }
+
+        [[nodiscard]] bool ContainsAsciiCaseInsensitive(std::string_view a_haystack, std::string_view a_needle) noexcept
+        {
+            if (a_needle.empty() || a_haystack.size() < a_needle.size()) {
+                return false;
+            }
+            const std::size_t limit = a_haystack.size() - a_needle.size();
+            for (std::size_t i = 0; i <= limit; ++i) {
+                bool match = true;
+                for (std::size_t j = 0; j < a_needle.size(); ++j) {
+                    if (ToUpperAsciiChar(a_haystack[i + j]) != ToUpperAsciiChar(a_needle[j])) {
+                        match = false;
+                        break;
+                    }
+                }
+                if (match) {
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+
+    bool IsHealActionVerb(std::string_view a_verb) noexcept
+    {
+        return ContainsAsciiCaseInsensitive(a_verb, "HEAL") ||
+               ContainsAsciiCaseInsensitive(a_verb, "STIMPAK") ||
+               ContainsAsciiCaseInsensitive(a_verb, "REVIVE");
+    }
+
+    bool UpdateQuickLootCompanionProtection(
+        std::int64_t& a_lastQuickLootActiveMs,
+        bool a_quickContainerVisible,
+        bool a_targetIsLiveCompanion,
+        std::int64_t a_nowMs,
+        std::int64_t a_graceMs) noexcept
+    {
+        if (a_quickContainerVisible && !a_targetIsLiveCompanion) {
+            a_lastQuickLootActiveMs = a_nowMs;
+            return true;
+        }
+        if (a_targetIsLiveCompanion) {
+            return a_lastQuickLootActiveMs > 0 &&
+                   (a_nowMs - a_lastQuickLootActiveMs) <= a_graceMs;
+        }
+        a_lastQuickLootActiveMs = 0;
+        return false;
+    }
+
+    CompanionFilterDecision EvaluateCompanionFilter(const CompanionFilterInput& a_in) noexcept
+    {
+        CompanionFilterDecision out{};
+        const float vanillaDist =
+            (std::isfinite(a_in.vanillaCommandPickDistance) && a_in.vanillaCommandPickDistance >= 0.0f)
+                ? a_in.vanillaCommandPickDistance
+                : 2000.0f;
+        const float vanillaCmdRad =
+            (std::isfinite(a_in.vanillaCommandPickRadius) && a_in.vanillaCommandPickRadius >= 0.0f)
+                ? a_in.vanillaCommandPickRadius
+                : 24.0f;
+        const float vanillaActRad =
+            (std::isfinite(a_in.vanillaActivatePickRadius) && a_in.vanillaActivatePickRadius >= 0.0f)
+                ? a_in.vanillaActivatePickRadius
+                : 16.0f;
+
+        if (!a_in.limitEnabled || a_in.inCommandMode) {
+            out.suppressTarget = false;
+            out.restoreVanillaSettings = true;
+            out.desiredCommandPickDistance = vanillaDist;
+            out.desiredCommandPickRadius = vanillaCmdRad;
+            return out;
+        }
+
+        const float normalDist = (std::isfinite(a_in.maxDistance) && a_in.maxDistance >= 0.0f)
+            ? a_in.maxDistance
+            : 160.0f;
+        const float combatDist = (std::isfinite(a_in.combatMaxDistance) && a_in.combatMaxDistance >= 0.0f)
+            ? a_in.combatMaxDistance
+            : 80.0f;
+        const float effectiveMaxDist = a_in.inCombat ? combatDist : normalDist;
+
+        if (a_in.deprioritizeLoot && a_in.quickLootProtected) {
+            out.desiredCommandPickDistance = 0.0f;
+            out.desiredCommandPickRadius = 0.0f;
+        } else {
+            out.desiredCommandPickDistance = effectiveMaxDist;
+            if (effectiveMaxDist <= 0.001f) {
+                out.desiredCommandPickRadius = 0.0f;
+            } else if (a_in.deprioritizeLoot) {
+                out.desiredCommandPickRadius = std::min(vanillaCmdRad, vanillaActRad);
+            } else {
+                out.desiredCommandPickRadius = vanillaCmdRad;
+            }
+        }
+
+        if (a_in.targetIsLiveCompanion && !a_in.targetIsBleedout && !a_in.targetHasHealVerb) {
+            if (a_in.deprioritizeLoot && a_in.quickLootProtected) {
+                out.suppressTarget = true;
+            } else if (effectiveMaxDist <= 0.001f) {
+                out.suppressTarget = true;
+            } else if (!std::isfinite(a_in.targetDistance) || a_in.targetDistance > effectiveMaxDist) {
+                out.suppressTarget = true;
+            }
+        }
+
+        return out;
+    }
+
     void HUDTransformState::Reset() noexcept
     {
         _isFloating = false;
@@ -40,6 +156,36 @@ namespace HUDController
 
     HUDFrameOutput HUDTransformState::Step(const HUDFrameInput& a_in)
     {
+        if (a_in.suppressTarget && !a_in.quickContainerVisible) {
+            _lossFrames = 0;
+            _hasPrevScreen = false;
+            _hasAnchorTarget = false;
+            _modifiedAlpha = true;
+            _hidingAlpha = true;
+
+            const bool restorePos = _isFloating && _hasBaseline;
+            _isFloating = false;
+            if (restorePos) {
+                _hasBaseline = false;
+                return {
+                    HUDAction::kSuppressNative,
+                    _baseX,
+                    _baseY,
+                    0.0f,
+                    true,
+                    true
+                };
+            }
+            return {
+                HUDAction::kSuppressNative,
+                0.0f,
+                0.0f,
+                0.0f,
+                false,
+                true
+            };
+        }
+
         const bool immediateAbort =
             !a_in.enabled ||
             (a_in.inPowerArmor && a_in.powerArmorBypass) ||
@@ -291,6 +437,16 @@ namespace HUDController
             return t == "..." || t == "\xE2\x80\xA6";
         }
 
+        [[nodiscard]] std::string ToLowerAscii(std::string a_input)
+        {
+            for (char& ch : a_input) {
+                if (ch >= 'A' && ch <= 'Z') {
+                    ch = static_cast<char>(ch + ('a' - 'A'));
+                }
+            }
+            return a_input;
+        }
+
         [[nodiscard]] std::string RawUpperKey(std::string_view a_sv)
         {
             return TargetInfo::ToUpperAscii(TrimWhitespace(a_sv));
@@ -299,6 +455,16 @@ namespace HUDController
         [[nodiscard]] std::string CleanUpperKey(std::string_view a_sv)
         {
             return TargetInfo::ToUpperAscii(TargetInfo::CleanDisplayName(std::string(a_sv), true));
+        }
+
+        [[nodiscard]] std::string RawLowerKey(std::string_view a_sv)
+        {
+            return ToLowerAscii(TrimWhitespace(a_sv));
+        }
+
+        [[nodiscard]] std::string CleanLowerKey(std::string_view a_sv)
+        {
+            return ToLowerAscii(TargetInfo::CleanDisplayName(std::string(a_sv), true));
         }
 
         [[nodiscard]] int EntryMatchScorePrecomputed(
@@ -365,6 +531,7 @@ namespace HUDController
                     existing.count = static_cast<std::uint32_t>(
                         std::min<std::uint64_t>(std::numeric_limits<std::uint32_t>::max(), sum));
                     existing.isTaggedForSearch = existing.isTaggedForSearch || cur.isTaggedForSearch;
+                    existing.isBetterThanEquipped = existing.isBetterThanEquipped || cur.isBetterThanEquipped;
                     if (existing.itemKind == TargetInfo::ItemKind::None) {
                         existing.itemKind = cur.itemKind;
                     }
@@ -386,7 +553,8 @@ namespace HUDController
         const std::vector<QuickContainerItemEntry>& a_inventoryItems,
         int a_maxVisibleRows,
         int a_preferredOrder,
-        std::int32_t a_prevStart)
+        std::int32_t a_prevStart,
+        const std::vector<std::uint8_t>* a_prioritizedInv)
     {
         QuickContainerMergeResult out;
         const int maxRows = std::clamp(a_maxVisibleRows, 3, 12);
@@ -435,12 +603,28 @@ namespace HUDController
 
         std::vector<std::string> invRawUpper;
         std::vector<std::string> invCleanUpper;
+        std::vector<std::string> invRawLower;
+        std::vector<std::string> invCleanLower;
+        std::vector<std::uint8_t> invPriority;
+        bool anyInvPriority = false;
         if (invExpandable) {
             invRawUpper.reserve(a_inventoryItems.size());
             invCleanUpper.reserve(a_inventoryItems.size());
-            for (const auto& inv : a_inventoryItems) {
+            invRawLower.reserve(a_inventoryItems.size());
+            invCleanLower.reserve(a_inventoryItems.size());
+            invPriority.reserve(a_inventoryItems.size());
+            for (std::size_t k = 0; k < a_inventoryItems.size(); ++k) {
+                const auto& inv = a_inventoryItems[k];
                 invRawUpper.push_back(RawUpperKey(inv.name));
                 invCleanUpper.push_back(CleanUpperKey(inv.name));
+                invRawLower.push_back(RawLowerKey(inv.name));
+                invCleanLower.push_back(CleanLowerKey(inv.name));
+                const bool cachedPrio =
+                    a_prioritizedInv &&
+                    k < a_prioritizedInv->size() &&
+                    (*a_prioritizedInv)[k] != 0u;
+                const bool prio = inv.isLegendary || inv.isTaggedForSearch || inv.isBetterThanEquipped || cachedPrio;
+                invPriority.push_back(prio ? std::uint8_t{ 1 } : std::uint8_t{ 0 });
             }
 
             std::vector<bool> invConsumed(a_inventoryItems.size(), false);
@@ -460,10 +644,24 @@ namespace HUDController
                     }
                 }
                 if (bestIdx >= 0) {
-                    invConsumed[static_cast<std::size_t>(bestIdx)] = true;
+                    const auto uBest = static_cast<std::size_t>(bestIdx);
+                    invConsumed[uBest] = true;
                     if (realEngine[j].itemKind == TargetInfo::ItemKind::None) {
-                        realEngine[j].itemKind = a_inventoryItems[static_cast<std::size_t>(bestIdx)].itemKind;
+                        realEngine[j].itemKind = a_inventoryItems[uBest].itemKind;
                     }
+                    if (realEngine[j].isLegendary || realEngine[j].isTaggedForSearch || realEngine[j].isBetterThanEquipped) {
+                        invPriority[uBest] = 1u;
+                    } else if (!a_inventoryItems[uBest].isLegendary &&
+                               !a_inventoryItems[uBest].isTaggedForSearch &&
+                               !a_inventoryItems[uBest].isBetterThanEquipped) {
+                        invPriority[uBest] = 0u;
+                    }
+                }
+            }
+            for (const std::uint8_t p : invPriority) {
+                if (p != 0u) {
+                    anyInvPriority = true;
+                    break;
                 }
             }
         } else if (!a_inventoryItems.empty()) {
@@ -478,6 +676,21 @@ namespace HUDController
                         (!engCleanUpper[j].empty() && engCleanUpper[j] == CleanUpperKey(a_inventoryItems[k].name))) {
                         realEngine[j].itemKind = a_inventoryItems[k].itemKind;
                         break;
+                    }
+                }
+            }
+        }
+
+        int distinctInvKinds = 0;
+        if (invExpandable) {
+            std::uint32_t kindMask = 0u;
+            for (const auto& inv : a_inventoryItems) {
+                const auto kIdx = static_cast<std::uint32_t>(inv.itemKind);
+                if (kIdx > 0u && kIdx < 32u) {
+                    const std::uint32_t bit = (1u << kIdx);
+                    if ((kindMask & bit) == 0u) {
+                        kindMask |= bit;
+                        ++distinctInvKinds;
                     }
                 }
             }
@@ -510,11 +723,17 @@ namespace HUDController
         const std::size_t winLen = realEngine.size();
 
         // Build lightweight index orderings with zero string copies in comparators:
-        // 0 = forward BGSInventoryList, 1 = reversed, 2 = case-insensitive raw (with [FIS] tags),
-        // 3 = case-sensitive raw, 4 = tag-stripped case-insensitive,
-        // 5 = Value DESC (raw tiebreak), 6 = Value DESC (clean tiebreak), 7 = Stack Value (value*count) DESC,
-        // 8 = Category ASC + Value DESC, 9 = Value/Weight DESC, 10 = Weight DESC
-        std::array<std::vector<std::size_t>, 11> orderCandidates;
+        // 0 = forward BGSInventoryList, 1 = reversed, 2 = _stricmp raw (invRawLower: '[' < 'a'..'z'),
+        // 3 = case-sensitive raw, 4 = _stricmp tag-stripped (invCleanLower),
+        // 5 = Value DESC (rawLower tiebreak), 6 = Value DESC (cleanLower tiebreak), 7 = Stack Value DESC,
+        // 8 = Legacy Category ASC + Value DESC, 9 = Value/Weight DESC, 10 = Weight DESC,
+        // 11 = uppercase raw (invRawUpper), 12 = unequipped-first + rawLower, 13 = Weight ASC,
+        // 14 = FO4 QC Category (Key->Book->Holo->Ammo->Aid->Weap->Misc->Armor) + Value DESC,
+        // 15 = FO4 QC Category (BGSInventoryList stable tiebreak),
+        // 16 = FO4 QC Category + rawLower,
+        // 17 = Priority-first + FO4 QC Category + Value DESC,
+        // 18 = Priority-first + FO4 QC Category (BGSInventoryList stable tiebreak)
+        std::array<std::vector<std::size_t>, 19> orderCandidates;
         orderCandidates[0].resize(nInv);
         for (std::size_t k = 0; k < nInv; ++k) {
             orderCandidates[0][k] = k;
@@ -522,8 +741,8 @@ namespace HUDController
         orderCandidates[1].assign(orderCandidates[0].rbegin(), orderCandidates[0].rend());
         orderCandidates[2] = orderCandidates[0];
         std::stable_sort(orderCandidates[2].begin(), orderCandidates[2].end(),
-            [&invRawUpper](std::size_t a, std::size_t b) {
-                return invRawUpper[a] < invRawUpper[b];
+            [&invRawLower](std::size_t a, std::size_t b) {
+                return invRawLower[a] < invRawLower[b];
             });
         orderCandidates[3] = orderCandidates[0];
         std::stable_sort(orderCandidates[3].begin(), orderCandidates[3].end(),
@@ -532,9 +751,89 @@ namespace HUDController
             });
         orderCandidates[4] = orderCandidates[0];
         std::stable_sort(orderCandidates[4].begin(), orderCandidates[4].end(),
-            [&invCleanUpper](std::size_t a, std::size_t b) {
-                return invCleanUpper[a] < invCleanUpper[b];
+            [&invCleanLower](std::size_t a, std::size_t b) {
+                return invCleanLower[a] < invCleanLower[b];
             });
+        orderCandidates[11] = orderCandidates[0];
+        std::stable_sort(orderCandidates[11].begin(), orderCandidates[11].end(),
+            [&invRawUpper](std::size_t a, std::size_t b) {
+                return invRawUpper[a] < invRawUpper[b];
+            });
+        orderCandidates[12] = orderCandidates[0];
+        std::stable_sort(orderCandidates[12].begin(), orderCandidates[12].end(),
+            [&a_inventoryItems, &invRawLower](std::size_t a, std::size_t b) {
+                if (a_inventoryItems[a].isEquipped != a_inventoryItems[b].isEquipped) {
+                    return !a_inventoryItems[a].isEquipped;
+                }
+                return invRawLower[a] < invRawLower[b];
+            });
+
+        auto fo4QcCategoryRank = [](TargetInfo::ItemKind a_kind) -> int {
+            switch (a_kind) {
+            case TargetInfo::ItemKind::Key:
+                return 0;
+            case TargetInfo::ItemKind::BookNote:
+                return 1;
+            case TargetInfo::ItemKind::Holotape:
+                return 2;
+            case TargetInfo::ItemKind::Ammo:
+                return 3;
+            case TargetInfo::ItemKind::Aid:
+                return 4;
+            case TargetInfo::ItemKind::Weapon:
+                return 5;
+            case TargetInfo::ItemKind::MiscJunk:
+                return 6;
+            case TargetInfo::ItemKind::Armor:
+                return 7;
+            default:
+                return 8;
+            }
+        };
+
+        orderCandidates[15] = orderCandidates[0];
+        std::stable_sort(orderCandidates[15].begin(), orderCandidates[15].end(),
+            [&a_inventoryItems, &fo4QcCategoryRank](std::size_t a, std::size_t b) {
+                return fo4QcCategoryRank(a_inventoryItems[a].itemKind) <
+                       fo4QcCategoryRank(a_inventoryItems[b].itemKind);
+            });
+        orderCandidates[16] = orderCandidates[0];
+        std::stable_sort(orderCandidates[16].begin(), orderCandidates[16].end(),
+            [&a_inventoryItems, &invRawLower, &fo4QcCategoryRank](std::size_t a, std::size_t b) {
+                const int ra = fo4QcCategoryRank(a_inventoryItems[a].itemKind);
+                const int rb = fo4QcCategoryRank(a_inventoryItems[b].itemKind);
+                if (ra != rb) {
+                    return ra < rb;
+                }
+                return invRawLower[a] < invRawLower[b];
+            });
+        if (anyInvPriority) {
+            orderCandidates[17] = orderCandidates[0];
+            std::stable_sort(orderCandidates[17].begin(), orderCandidates[17].end(),
+                [&a_inventoryItems, &invRawLower, &invPriority, &fo4QcCategoryRank](std::size_t a, std::size_t b) {
+                    if (invPriority[a] != invPriority[b]) {
+                        return invPriority[a] > invPriority[b];
+                    }
+                    const int ra = fo4QcCategoryRank(a_inventoryItems[a].itemKind);
+                    const int rb = fo4QcCategoryRank(a_inventoryItems[b].itemKind);
+                    if (ra != rb) {
+                        return ra < rb;
+                    }
+                    if (a_inventoryItems[a].value != a_inventoryItems[b].value) {
+                        return a_inventoryItems[a].value > a_inventoryItems[b].value;
+                    }
+                    return invRawLower[a] < invRawLower[b];
+                });
+            orderCandidates[18] = orderCandidates[0];
+            std::stable_sort(orderCandidates[18].begin(), orderCandidates[18].end(),
+                [&a_inventoryItems, &invPriority, &fo4QcCategoryRank](std::size_t a, std::size_t b) {
+                    if (invPriority[a] != invPriority[b]) {
+                        return invPriority[a] > invPriority[b];
+                    }
+                    return fo4QcCategoryRank(a_inventoryItems[a].itemKind) <
+                           fo4QcCategoryRank(a_inventoryItems[b].itemKind);
+                });
+        }
 
         bool hasValueOrWeight = false;
         for (const auto& inv : a_inventoryItems) {
@@ -579,23 +878,23 @@ namespace HUDController
 
             orderCandidates[5] = orderCandidates[0];
             std::stable_sort(orderCandidates[5].begin(), orderCandidates[5].end(),
-                [&a_inventoryItems, &invRawUpper](std::size_t a, std::size_t b) {
+                [&a_inventoryItems, &invRawLower](std::size_t a, std::size_t b) {
                     if (a_inventoryItems[a].value != a_inventoryItems[b].value) {
                         return a_inventoryItems[a].value > a_inventoryItems[b].value;
                     }
-                    return invRawUpper[a] < invRawUpper[b];
+                    return invRawLower[a] < invRawLower[b];
                 });
             orderCandidates[6] = orderCandidates[0];
             std::stable_sort(orderCandidates[6].begin(), orderCandidates[6].end(),
-                [&a_inventoryItems, &invCleanUpper](std::size_t a, std::size_t b) {
+                [&a_inventoryItems, &invCleanLower](std::size_t a, std::size_t b) {
                     if (a_inventoryItems[a].value != a_inventoryItems[b].value) {
                         return a_inventoryItems[a].value > a_inventoryItems[b].value;
                     }
-                    return invCleanUpper[a] < invCleanUpper[b];
+                    return invCleanLower[a] < invCleanLower[b];
                 });
             orderCandidates[7] = orderCandidates[0];
             std::stable_sort(orderCandidates[7].begin(), orderCandidates[7].end(),
-                [&a_inventoryItems, &invRawUpper](std::size_t a, std::size_t b) {
+                [&a_inventoryItems, &invRawLower](std::size_t a, std::size_t b) {
                     const std::uint64_t va =
                         static_cast<std::uint64_t>(a_inventoryItems[a].value) * a_inventoryItems[a].count;
                     const std::uint64_t vb =
@@ -603,11 +902,11 @@ namespace HUDController
                     if (va != vb) {
                         return va > vb;
                     }
-                    return invRawUpper[a] < invRawUpper[b];
+                    return invRawLower[a] < invRawLower[b];
                 });
             orderCandidates[8] = orderCandidates[0];
             std::stable_sort(orderCandidates[8].begin(), orderCandidates[8].end(),
-                [&a_inventoryItems, &invRawUpper, &categoryRank](std::size_t a, std::size_t b) {
+                [&a_inventoryItems, &invRawLower, &categoryRank](std::size_t a, std::size_t b) {
                     const int ra = categoryRank(a_inventoryItems[a].itemKind);
                     const int rb = categoryRank(a_inventoryItems[b].itemKind);
                     if (ra != rb) {
@@ -616,11 +915,11 @@ namespace HUDController
                     if (a_inventoryItems[a].value != a_inventoryItems[b].value) {
                         return a_inventoryItems[a].value > a_inventoryItems[b].value;
                     }
-                    return invRawUpper[a] < invRawUpper[b];
+                    return invRawLower[a] < invRawLower[b];
                 });
             orderCandidates[9] = orderCandidates[0];
             std::stable_sort(orderCandidates[9].begin(), orderCandidates[9].end(),
-                [&a_inventoryItems, &invRawUpper, &valuePerWeightRank](std::size_t a, std::size_t b) {
+                [&a_inventoryItems, &invRawLower, &valuePerWeightRank](std::size_t a, std::size_t b) {
                     const float ra = valuePerWeightRank(a_inventoryItems[a]);
                     const float rb = valuePerWeightRank(a_inventoryItems[b]);
                     if (ra != rb) {
@@ -629,11 +928,11 @@ namespace HUDController
                     if (a_inventoryItems[a].value != a_inventoryItems[b].value) {
                         return a_inventoryItems[a].value > a_inventoryItems[b].value;
                     }
-                    return invRawUpper[a] < invRawUpper[b];
+                    return invRawLower[a] < invRawLower[b];
                 });
             orderCandidates[10] = orderCandidates[0];
             std::stable_sort(orderCandidates[10].begin(), orderCandidates[10].end(),
-                [&a_inventoryItems, &invRawUpper](std::size_t a, std::size_t b) {
+                [&a_inventoryItems, &invRawLower](std::size_t a, std::size_t b) {
                     const float rawA = a_inventoryItems[a].weight;
                     const float rawB = a_inventoryItems[b].weight;
                     const float wa = (std::isfinite(rawA) && rawA > 0.0f) ? rawA : 0.0f;
@@ -641,7 +940,32 @@ namespace HUDController
                     if (wa != wb) {
                         return wa > wb;
                     }
-                    return invRawUpper[a] < invRawUpper[b];
+                    return invRawLower[a] < invRawLower[b];
+                });
+            orderCandidates[13] = orderCandidates[0];
+            std::stable_sort(orderCandidates[13].begin(), orderCandidates[13].end(),
+                [&a_inventoryItems, &invRawLower](std::size_t a, std::size_t b) {
+                    const float rawA = a_inventoryItems[a].weight;
+                    const float rawB = a_inventoryItems[b].weight;
+                    const float wa = (std::isfinite(rawA) && rawA > 0.0f) ? rawA : 0.0f;
+                    const float wb = (std::isfinite(rawB) && rawB > 0.0f) ? rawB : 0.0f;
+                    if (wa != wb) {
+                        return wa < wb;
+                    }
+                    return invRawLower[a] < invRawLower[b];
+                });
+            orderCandidates[14] = orderCandidates[0];
+            std::stable_sort(orderCandidates[14].begin(), orderCandidates[14].end(),
+                [&a_inventoryItems, &invRawLower, &fo4QcCategoryRank](std::size_t a, std::size_t b) {
+                    const int ra = fo4QcCategoryRank(a_inventoryItems[a].itemKind);
+                    const int rb = fo4QcCategoryRank(a_inventoryItems[b].itemKind);
+                    if (ra != rb) {
+                        return ra < rb;
+                    }
+                    if (a_inventoryItems[a].value != a_inventoryItems[b].value) {
+                        return a_inventoryItems[a].value > a_inventoryItems[b].value;
+                    }
+                    return invRawLower[a] < invRawLower[b];
                 });
         }
 
@@ -715,6 +1039,13 @@ namespace HUDController
                 if (c >= 2) {
                     totalScore += 2;
                 }
+                if (distinctInvKinds >= 2) {
+                    if (c == 14) {
+                        totalScore += 1;
+                    } else if (c == 17) {
+                        totalScore += 2;
+                    }
+                }
                 if (a_prevStart >= 0) {
                     const int dist = std::abs(static_cast<int>(start) - a_prevStart);
                     if (dist <= 1) {
@@ -762,6 +1093,13 @@ namespace HUDController
         out.hasMoreAbove = (win.start > 0);
         out.hasMoreBelow = (win.end < total);
         out.windowItems.reserve(static_cast<std::size_t>(std::max(0, win.end - win.start)));
+        if (anyInvPriority) {
+            for (std::size_t k = 0; k < nInv; ++k) {
+                if (invPriority[k] != 0u) {
+                    out.matchedPriorityInvIndices.push_back(k);
+                }
+            }
+        }
 
         for (int i = win.start; i < win.end; ++i) {
             QuickContainerItemEntry entry = a_inventoryItems[winningOrder[static_cast<std::size_t>(i)]];
@@ -773,6 +1111,7 @@ namespace HUDController
                 entry.isFavorite = src.isFavorite;
                 entry.isTaggedForSearch = src.isTaggedForSearch;
                 entry.isEquipped = src.isEquipped;
+                entry.isBetterThanEquipped = src.isBetterThanEquipped;
                 if (entry.itemKind == TargetInfo::ItemKind::None) {
                     entry.itemKind = src.itemKind;
                 }
@@ -799,6 +1138,7 @@ namespace HUDController
             a_cache.stickyFallback = false;
             a_cache.everExpanded = false;
             a_cache.consecutiveMisses = 0;
+            a_cache.stickyPriorityKeys.clear();
         } else if (a_invSnap.generation != a_cache.stickyInvGen) {
             a_cache.stickyInvGen = a_invSnap.generation;
             a_cache.stickyFallback = false;
@@ -823,7 +1163,10 @@ namespace HUDController
             }
             rawHash ^= std::hash<std::string>{}(it.name) + 0x9e3779b9u + (rawHash << 6) + (rawHash >> 2);
             rawHash ^= std::hash<std::uint32_t>{}(it.count) + 0x9e3779b9u + (rawHash << 6) + (rawHash >> 2);
-            rawHash ^= std::hash<bool>{}(it.isEquipped) + 0x9e3779b9u;
+            rawHash ^= std::hash<bool>{}(it.isEquipped) + 0x9e3779b9u + (rawHash << 6) + (rawHash >> 2);
+            rawHash ^= std::hash<bool>{}(it.isLegendary) + 0x9e3779b9u + (rawHash << 6) + (rawHash >> 2);
+            rawHash ^= std::hash<bool>{}(it.isTaggedForSearch) + 0x9e3779b9u + (rawHash << 6) + (rawHash >> 2);
+            rawHash ^= std::hash<bool>{}(it.isBetterThanEquipped) + 0x9e3779b9u + (rawHash << 6) + (rawHash >> 2);
         }
 
         if (a_ownerFormID != 0 &&
@@ -844,11 +1187,33 @@ namespace HUDController
             a_cache.consecutiveMisses = 0;
         } else {
             const bool skipExpansion = a_invSnap.truncatedByCap || a_cache.stickyFallback;
+            std::vector<std::uint8_t> cachedPriority;
+            if (!skipExpansion && !a_cache.stickyPriorityKeys.empty() && !a_invSnap.items.empty()) {
+                cachedPriority.assign(a_invSnap.items.size(), 0u);
+                for (std::size_t k = 0; k < a_invSnap.items.size(); ++k) {
+                    const auto& inv = a_invSnap.items[k];
+                    const std::string invClean = CleanUpperKey(inv.name);
+                    if (invClean.empty()) {
+                        continue;
+                    }
+                    for (const auto& pKey : a_cache.stickyPriorityKeys) {
+                        if (inv.stackSignature == pKey.stackSignature &&
+                            inv.isEquipped == pKey.isEquipped &&
+                            inv.isFavorite == pKey.isFavorite &&
+                            inv.itemKind == pKey.itemKind &&
+                            invClean == pKey.cleanUpperName) {
+                            cachedPriority[k] = 1u;
+                            break;
+                        }
+                    }
+                }
+            }
             res = skipExpansion
                 ? MergeQuickContainerInventory(a_rawWindow, a_rawSel, {}, a_maxRows)
                 : MergeQuickContainerInventory(
                     a_rawWindow, a_rawSel, a_invSnap.items, a_maxRows,
-                    a_cache.lockedOrderIndex, a_cache.lastMatchedStart);
+                    a_cache.lockedOrderIndex, a_cache.lastMatchedStart,
+                    cachedPriority.empty() ? nullptr : &cachedPriority);
 
             if (skipExpansion) {
                 EnrichWindowKindsFromMap(res.windowItems, a_invSnap.kindByCleanUpper);
@@ -859,6 +1224,20 @@ namespace HUDController
                 a_cache.stickyFallback = false;
                 a_cache.lockedOrderIndex = res.matchedOrderIndex;
                 a_cache.lastMatchedStart = res.matchedStartIndex;
+                a_cache.stickyPriorityKeys.clear();
+                a_cache.stickyPriorityKeys.reserve(res.matchedPriorityInvIndices.size());
+                for (const std::size_t k : res.matchedPriorityInvIndices) {
+                    if (k < a_invSnap.items.size()) {
+                        const auto& inv = a_invSnap.items[k];
+                        a_cache.stickyPriorityKeys.push_back({
+                            CleanUpperKey(inv.name),
+                            inv.stackSignature,
+                            inv.isEquipped,
+                            inv.isFavorite,
+                            inv.itemKind
+                        });
+                    }
+                }
             } else {
                 const bool hadPrevStart = (a_cache.lastMatchedStart >= 0);
                 const bool expansionEligible =
@@ -891,6 +1270,7 @@ namespace HUDController
                         a_cache.stickyFallback = true;
                     }
                 }
+                EnrichWindowKindsFromMap(res.windowItems, a_invSnap.kindByCleanUpper);
             }
         }
 
@@ -1700,6 +2080,7 @@ namespace HUDController
                 entry.isFavorite = it.isFavorite;
                 entry.isTaggedForSearch = it.isTaggedForSearch;
                 entry.isEquipped = (it.equipState > 0);
+                entry.isBetterThanEquipped = it.isBetterThanEquippedItem;
                 a_out.items.push_back(std::move(entry));
             }
         }
@@ -1739,6 +2120,7 @@ namespace HUDController
             a_out.isLegendary = TryReadBoolMember(a_itemObj, "isLegendary"sv, ""sv, false);
             a_out.isFavorite = TryReadBoolMember(a_itemObj, "favorite"sv, ""sv, false);
             a_out.isTaggedForSearch = TryReadBoolMember(a_itemObj, "taggedForSearch"sv, ""sv, false);
+            a_out.isBetterThanEquipped = TryReadBoolMember(a_itemObj, "isBetterThanEquippedItem"sv, ""sv, false);
 
             RE::Scaleform::GFx::Value eqVal;
             float eqFloat = 0.0f;
@@ -1902,6 +2284,61 @@ namespace HUDController
             }
 
             return sig;
+        }
+
+        [[nodiscard]] const RE::TBO_InstanceData* ResolveItemInstanceData(
+            const RE::TESBoundObject* a_obj,
+            RE::ExtraDataList* a_stackExtra)
+        {
+            if (!a_obj) {
+                return nullptr;
+            }
+            if (a_stackExtra) {
+                if (auto* instExtra = a_stackExtra->GetByType<RE::ExtraInstanceData>()) {
+                    if (instExtra->data && (!instExtra->base || instExtra->base == a_obj)) {
+                        return instExtra->data.get();
+                    }
+                }
+            }
+            return a_obj->GetBaseInstanceData();
+        }
+
+        [[nodiscard]] bool ResolveInventoryStackDisplayName(
+            RE::BGSInventoryItem& a_invItem,
+            std::uint32_t a_stackIdx,
+            RE::ExtraDataList* a_stackExtra,
+            const std::string& a_baseName,
+            bool a_hasBaseName,
+            bool a_allowInstancedFullName,
+            std::string& a_outName)
+        {
+            a_outName = a_baseName;
+            bool hasExplicitDisplayName = a_hasBaseName;
+            if (a_stackExtra) {
+                auto* textExtra = a_stackExtra->GetByType<RE::ExtraTextDisplayData>();
+                const char* overrideRaw = (textExtra && !textExtra->displayName.empty())
+                    ? textExtra->displayName.c_str()
+                    : nullptr;
+                if (overrideRaw && !TrimWhitespace(overrideRaw).empty()) {
+                    a_outName = overrideRaw;
+                    hasExplicitDisplayName = true;
+                } else if (a_hasBaseName) {
+                    const char* full = a_invItem.GetDisplayFullName(a_stackIdx);
+                    if (full && full[0] != '\0') {
+                        a_outName = full;
+                    }
+                }
+            } else if (a_hasBaseName && a_allowInstancedFullName) {
+                const char* full = a_invItem.GetDisplayFullName(a_stackIdx);
+                if (full && full[0] != '\0') {
+                    a_outName = full;
+                }
+            }
+
+            const std::string trimmedDisplay = TrimWhitespace(a_outName);
+            return hasExplicitDisplayName &&
+                   !trimmedDisplay.empty() &&
+                   !TargetInfo::CleanDisplayName(trimmedDisplay, true).empty();
         }
 
         void ReadQuickContainerData(
@@ -2362,6 +2799,54 @@ namespace HUDController
             using namespace std::chrono;
             return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
         }
+
+        inline constexpr std::uint32_t kCurrentCompanionFactionFormID = 0x00023C01u;
+
+        [[nodiscard]] bool IsActorDeadOrDying(const RE::Actor* a_actor) noexcept
+        {
+            if (!a_actor) {
+                return false;
+            }
+            if (a_actor->IsDead(true)) {
+                return true;
+            }
+            const auto life = static_cast<RE::ACTOR_LIFE_STATE>(a_actor->lifeState);
+            return life == RE::ACTOR_LIFE_STATE::kDead || life == RE::ACTOR_LIFE_STATE::kDying;
+        }
+
+        [[nodiscard]] bool IsActorBleedout(const RE::Actor* a_actor) noexcept
+        {
+            if (!a_actor) {
+                return false;
+            }
+            const auto life = static_cast<RE::ACTOR_LIFE_STATE>(a_actor->lifeState);
+            if (life == RE::ACTOR_LIFE_STATE::kBleedout || life == RE::ACTOR_LIFE_STATE::kEssentialDown) {
+                return true;
+            }
+            return a_actor->boolFlags.all(RE::Actor::BOOL_FLAGS::kInBleedoutAnimation);
+        }
+
+        [[nodiscard]] bool IsCompanionActor(RE::Actor* a_actor, RE::PlayerCharacter* a_player)
+        {
+            if (!a_actor || !a_player || a_actor == a_player) {
+                return false;
+            }
+            if (a_actor->GetHostileToActor(a_player)) {
+                return false;
+            }
+            static RE::TESFaction* s_companionFaction = nullptr;
+            if (!s_companionFaction) {
+                s_companionFaction = RE::TESForm::GetFormByID<RE::TESFaction>(kCurrentCompanionFactionFormID);
+            }
+            if (s_companionFaction && a_actor->IsInFaction(s_companionFaction)) {
+                return true;
+            }
+            if (a_actor->boolFlags.all(RE::Actor::BOOL_FLAGS::kCanDoFavor) ||
+                a_actor->boolFlags.all(RE::Actor::BOOL_FLAGS::kIsCommandedActor)) {
+                return true;
+            }
+            return a_actor->IsFollowing();
+        }
     }
 
     void Controller::Install()
@@ -2381,6 +2866,144 @@ namespace HUDController
         }
 
         EnsurePickRefSink();
+        EnsureActivateHook();
+    }
+
+    void Controller::EnsureActivateHook()
+    {
+        if (_activateHooked.load(std::memory_order_acquire)) {
+            return;
+        }
+
+        auto* pc = RE::PlayerControls::GetSingleton();
+        if (!pc || !pc->activateHandler) {
+            return;
+        }
+
+        if (!_activateHooked.exchange(true)) {
+            auto* user = reinterpret_cast<RE::BSInputEventUser*>(pc->activateHandler);
+            bool isHeldState = false;
+            for (const auto* h : pc->heldStateHandlers) {
+                if (reinterpret_cast<const void*>(h) == reinterpret_cast<const void*>(user)) {
+                    isHeldState = true;
+                    break;
+                }
+            }
+            _activateIsHeldStateHandler.store(isHeldState, std::memory_order_release);
+
+            const auto vtableAddr = *reinterpret_cast<const std::uintptr_t*>(pc->activateHandler);
+            const auto origSlot = reinterpret_cast<const std::uintptr_t*>(vtableAddr)[1];
+            _origActivateShouldHandleEvent.store(origSlot, std::memory_order_release);
+            (void)REL::Relocation<std::uintptr_t>{ vtableAddr }.write_vfunc(1, &Hook_ActivateShouldHandleEvent);
+            logger::info(
+                "Hooked ActivateHandler::ShouldHandleEvent at vtable {:X} (heldState={})",
+                vtableAddr,
+                isHeldState);
+        }
+    }
+
+    bool Controller::ShouldBlockCompanionActivation() const noexcept
+    {
+        return _suppressCompanionActivate.load(std::memory_order_acquire);
+    }
+
+    bool Controller::Hook_ActivateShouldHandleEvent(RE::BSInputEventUser* a_this, const RE::InputEvent* a_event)
+    {
+        using Fn = bool (*)(RE::BSInputEventUser*, const RE::InputEvent*);
+        const auto fnAddr = _origActivateShouldHandleEvent.load(std::memory_order_acquire);
+        const bool orig = fnAddr ? reinterpret_cast<Fn>(fnAddr)(a_this, a_event) : false;
+        if (!orig) {
+            return false;
+        }
+
+        auto& ctrl = GetSingleton();
+        if (ctrl._activateIsHeldStateHandler.load(std::memory_order_acquire) && a_this) {
+            const auto* held = static_cast<const RE::HeldStateHandler*>(a_this);
+            if (held->heldStateActive) {
+                return true;
+            }
+        }
+
+        if (ctrl.ShouldBlockCompanionActivation()) {
+            return false;
+        }
+
+        return true;
+    }
+
+    void Controller::ResolveCompanionEngineSettings()
+    {
+        if (_companionSettingsResolved) {
+            return;
+        }
+
+        if (auto* gsc = RE::GameSettingCollection::GetSingleton()) {
+            for (const auto& entry : gsc->settings) {
+                if (entry.second &&
+                    entry.second->GetType() == RE::Setting::SETTING_TYPE::kFloat &&
+                    entry.second->GetKey() == "fCommandRequestPickDistance"sv) {
+                    _gmstCommandPickDist = entry.second;
+                    _origCommandPickDist = entry.second->GetFloat();
+                    _hasOrigCommandPickDist = std::isfinite(_origCommandPickDist);
+                    break;
+                }
+            }
+        }
+
+        if (auto* ini = RE::INISettingCollection::GetSingleton()) {
+            if (auto* cmdRad = ini->GetSetting("fCommandActivatePickRadius:Interface"sv);
+                cmdRad && cmdRad->GetType() == RE::Setting::SETTING_TYPE::kFloat) {
+                _iniCommandPickRadius = cmdRad;
+                _origCommandPickRadius = cmdRad->GetFloat();
+                _hasOrigCommandPickRadius = std::isfinite(_origCommandPickRadius);
+            }
+            if (auto* actRad = ini->GetSetting("fActivatePickRadius:Interface"sv);
+                actRad && actRad->GetType() == RE::Setting::SETTING_TYPE::kFloat) {
+                _iniActivatePickRadius = actRad;
+                _origActivatePickRadius = actRad->GetFloat();
+                _hasOrigActivatePickRadius = std::isfinite(_origActivatePickRadius);
+            }
+        }
+
+        if (_gmstCommandPickDist || _iniCommandPickRadius) {
+            _companionSettingsResolved = true;
+            logger::info(
+                "Resolved companion pick settings: fCommandRequestPickDistance={} ({:.1f}), fCommandActivatePickRadius={} ({:.1f}), fActivatePickRadius={} ({:.1f})",
+                _gmstCommandPickDist != nullptr,
+                _origCommandPickDist,
+                _iniCommandPickRadius != nullptr,
+                _origCommandPickRadius,
+                _iniActivatePickRadius != nullptr,
+                _origActivatePickRadius);
+        }
+    }
+
+    void Controller::ApplyCompanionEngineSettings(float a_dist, float a_radius)
+    {
+        if (_gmstCommandPickDist && _hasOrigCommandPickDist && std::isfinite(a_dist)) {
+            if (std::fabs(_gmstCommandPickDist->GetFloat() - a_dist) > 0.01f) {
+                _gmstCommandPickDist->SetFloat(a_dist);
+            }
+        }
+        if (_iniCommandPickRadius && _hasOrigCommandPickRadius && std::isfinite(a_radius)) {
+            if (std::fabs(_iniCommandPickRadius->GetFloat() - a_radius) > 0.01f) {
+                _iniCommandPickRadius->SetFloat(a_radius);
+            }
+        }
+    }
+
+    void Controller::RestoreCompanionEngineSettings()
+    {
+        if (_gmstCommandPickDist && _hasOrigCommandPickDist) {
+            if (std::fabs(_gmstCommandPickDist->GetFloat() - _origCommandPickDist) > 0.01f) {
+                _gmstCommandPickDist->SetFloat(_origCommandPickDist);
+            }
+        }
+        if (_iniCommandPickRadius && _hasOrigCommandPickRadius) {
+            if (std::fabs(_iniCommandPickRadius->GetFloat() - _origCommandPickRadius) > 0.01f) {
+                _iniCommandPickRadius->SetFloat(_origCommandPickRadius);
+            }
+        }
     }
 
     void Controller::EnsurePickRefSink()
@@ -2451,6 +3074,8 @@ namespace HUDController
             _cachedAnchorFormID = 0;
             _cachedAnchorRoot3D = nullptr;
             _cachedAnchorRefScale = 0;
+            _lastQuickLootActiveMs = 0;
+            RestoreCompanionEngineSettings();
             InvalidateQuickContainerCacheInternal();
             return;
         }
@@ -2461,6 +3086,7 @@ namespace HUDController
 
     void Controller::ClearOverlaySnapshot()
     {
+        _suppressCompanionActivate.store(false, std::memory_order_release);
         _hoverTargetKey.store(0, std::memory_order_relaxed);
         _hoverFirstSeenMs.store(0, std::memory_order_relaxed);
         _qcHoverItemHash.store(0, std::memory_order_relaxed);
@@ -2519,29 +3145,36 @@ namespace HUDController
             int bestScore = 0;
 
             for (const auto& invItem : a_invOwner->inventoryList->data) {
-                if (!invItem.object) {
+                if (!invItem.object || invItem.object->IsDeleted()) {
                     continue;
                 }
                 const std::string_view baseSv = RE::TESFullName::GetFullName(*invItem.object);
                 const std::string baseName = baseSv.empty() ? std::string{} : std::string(baseSv);
+                const bool hasBaseName = !TrimWhitespace(baseName).empty();
+                const auto objFormType = invItem.object->GetFormType();
+                const bool allowInstancedFullName =
+                    (objFormType == RE::ENUM_FORM_ID::kWEAP || objFormType == RE::ENUM_FORM_ID::kARMO);
 
                 std::uint32_t stackIdx = 0;
                 for (auto* stack = invItem.stackData.get(); stack; stack = stack->nextStack.get(), ++stackIdx) {
                     if (stack->GetCount() == 0) {
                         continue;
                     }
-                    std::string rawName = baseName;
                     RE::ExtraDataList* stackExtra = stack->extra.get();
-                    if (stackExtra) {
-                        if (auto* textExtra = stackExtra->GetByType<RE::ExtraTextDisplayData>();
-                            textExtra && !textExtra->displayName.empty()) {
-                            rawName = textExtra->displayName.c_str();
-                        } else {
-                            const char* full = const_cast<RE::BGSInventoryItem&>(invItem).GetDisplayFullName(stackIdx);
-                            if (full && full[0] != '\0') {
-                                rawName = full;
-                            }
-                        }
+                    const RE::TBO_InstanceData* instData = ResolveItemInstanceData(invItem.object, stackExtra);
+                    if (!invItem.object->GetPlayable(instData)) {
+                        continue;
+                    }
+                    std::string rawName;
+                    if (!ResolveInventoryStackDisplayName(
+                            const_cast<RE::BGSInventoryItem&>(invItem),
+                            stackIdx,
+                            stackExtra,
+                            baseName,
+                            hasBaseName,
+                            allowInstancedFullName,
+                            rawName)) {
+                        continue;
                     }
 
                     int score = 0;
@@ -2677,7 +3310,7 @@ namespace HUDController
             nextSnap.items.reserve(std::min(liveListSize, kMaxExpandedInventoryItems));
 
             for (const auto& invItem : a_invOwner->inventoryList->data) {
-                if (!invItem.object) {
+                if (!invItem.object || invItem.object->IsDeleted()) {
                     continue;
                 }
                 const auto kind = TargetInfo::ClassifyBoundObject(invItem.object);
@@ -2692,7 +3325,8 @@ namespace HUDController
 
                 const std::string_view baseSv = RE::TESFullName::GetFullName(*invItem.object);
                 const std::string baseName = baseSv.empty() ? std::string{} : std::string(baseSv);
-                const std::string cleanBaseKey = baseName.empty() ? std::string{} : CleanUpperKey(baseName);
+                const bool hasBaseName = !TrimWhitespace(baseName).empty();
+                const std::string cleanBaseKey = hasBaseName ? CleanUpperKey(baseName) : std::string{};
 
                 if (nextSnap.truncatedByCap) {
                     if (!cleanBaseKey.empty() && nextSnap.kindByCleanUpper.size() < 2048) {
@@ -2721,35 +3355,23 @@ namespace HUDController
                     }
 
                     RE::ExtraDataList* stackExtra = stack->extra.get();
-                    const RE::TBO_InstanceData* instData = nullptr;
-                    if (stackExtra) {
-                        if (auto* instExtra = stackExtra->GetByType<RE::ExtraInstanceData>()) {
-                            if (instExtra->data && (!instExtra->base || instExtra->base == invItem.object)) {
-                                instData = instExtra->data.get();
-                            }
-                        }
-                    }
-                    if (!instData) {
-                        instData = invItem.object->GetBaseInstanceData();
-                    }
+                    const RE::TBO_InstanceData* instData = ResolveItemInstanceData(invItem.object, stackExtra);
                     if (!invItem.object->GetPlayable(instData)) {
                         continue;
                     }
 
-                    std::string displayName = baseName;
                     const bool favorite = (stackExtra && stackExtra->HasType(RE::EXTRA_DATA_TYPE::kFavorite));
-                    if (stackExtra) {
-                        if (auto* textExtra = stackExtra->GetByType<RE::ExtraTextDisplayData>();
-                            textExtra && !textExtra->displayName.empty()) {
-                            displayName = textExtra->displayName.c_str();
-                        } else {
-                            const char* full = const_cast<RE::BGSInventoryItem&>(invItem).GetDisplayFullName(stackIdx);
-                            if (full && full[0] != '\0') {
-                                displayName = full;
-                            }
-                        }
-                    }
-                    if (displayName.empty()) {
+                    const bool allowInstancedFullName =
+                        (kind == TargetInfo::ItemKind::Weapon || kind == TargetInfo::ItemKind::Armor);
+                    std::string displayName;
+                    if (!ResolveInventoryStackDisplayName(
+                            const_cast<RE::BGSInventoryItem&>(invItem),
+                            stackIdx,
+                            stackExtra,
+                            baseName,
+                            hasBaseName,
+                            allowInstancedFullName,
+                            displayName)) {
                         continue;
                     }
 
@@ -2998,6 +3620,8 @@ namespace HUDController
         PerformDeferredResets();
 
         if (!a_hudMenu || !a_hudMenu->uiMovie || !a_hudMenu->uiMovie->GetVisible()) {
+            _lastQuickLootActiveMs = 0;
+            RestoreCompanionEngineSettings();
             ClearOverlaySnapshot();
             return false;
         }
@@ -3011,6 +3635,8 @@ namespace HUDController
         ResolvedClips clips;
         const bool ignoreQcAlpha = _qcState.IsHidingAlpha() || modernQcActive;
         if (!LocateHUDClips(*a_hudMenu, movie, ignoreQcAlpha, clips)) {
+            _lastQuickLootActiveMs = 0;
+            RestoreCompanionEngineSettings();
             ClearOverlaySnapshot();
             return false;
         }
@@ -3026,7 +3652,7 @@ namespace HUDController
         RE::NiAVObject* targeted3DHint = nullptr;
         auto* cam = RE::Main::WorldRootCamera();
 
-        if (cfg.enabled && !bypassActive && player) {
+        if (player && (cfg.limitCompanionPromptDistance || (cfg.enabled && !bypassActive))) {
             auto* targeted3D = player->targeted3D.get();
             bool hasPickEvent = false;
             pickedSmartPtr = GetPickedRef(hasPickEvent);
@@ -3051,6 +3677,82 @@ namespace HUDController
             }
         }
 
+        CompanionFilterDecision companionDecision{};
+        if (cfg.limitCompanionPromptDistance && player) {
+            EnsureActivateHook();
+            ResolveCompanionEngineSettings();
+
+            auto* targetActor = targetRef ? targetRef->As<RE::Actor>() : nullptr;
+            const bool targetIsDead = IsActorDeadOrDying(targetActor);
+            const bool targetIsLiveCompanion =
+                targetActor && !targetIsDead && IsCompanionActor(targetActor, player);
+            const bool targetIsBleedout = targetIsLiveCompanion && IsActorBleedout(targetActor);
+
+            bool targetHasHealVerb = false;
+            if (targetIsLiveCompanion && !targetIsBleedout && clips.hasRollover) {
+                std::string btnText;
+                if (TryReadTextField(clips.rollover, "RolloverButton_tf"sv, btnText)) {
+                    targetHasHealVerb =
+                        IsHealActionVerb(btnText) ||
+                        IsHealActionVerb(TranslateScaleformKey(btnText));
+                }
+                if (!targetHasHealVerb) {
+                    if (auto* baseObj = targetRef->GetObjectReference()) {
+                        RE::BSStringT<char> actText;
+                        if (baseObj->GetActivateText(targetRef, actText) && !actText.empty()) {
+                            targetHasHealVerb =
+                                IsHealActionVerb(actText.c_str()) ||
+                                IsHealActionVerb(TranslateScaleformKey(actText.c_str()));
+                        }
+                    }
+                }
+            }
+
+            const std::int64_t nowMs = SteadyNowMs();
+            const bool quickLootProtected = UpdateQuickLootCompanionProtection(
+                _lastQuickLootActiveMs,
+                clips.quickContainerVisible,
+                targetIsLiveCompanion,
+                nowMs,
+                kQuickLootCompanionGraceMs);
+
+            CompanionFilterInput filterIn{};
+            filterIn.limitEnabled = cfg.limitCompanionPromptDistance;
+            filterIn.deprioritizeLoot = cfg.companionDeprioritizeLoot;
+            filterIn.maxDistance = cfg.companionMaxDistance;
+            filterIn.combatMaxDistance = cfg.companionCombatMaxDistance;
+            filterIn.inCombat =
+                player->IsInCombat() || (targetActor && targetActor->IsInCombat());
+            filterIn.inCommandMode = static_cast<bool>(player->actorDoingPlayerCommand);
+            filterIn.quickLootProtected = quickLootProtected;
+            filterIn.targetIsLiveCompanion = targetIsLiveCompanion;
+            filterIn.targetIsBleedout = targetIsBleedout;
+            filterIn.targetHasHealVerb = targetHasHealVerb;
+            filterIn.targetDistance = targetRef
+                ? player->GetPosition().GetDistance(targetRef->GetPosition())
+                : 0.0f;
+            filterIn.vanillaCommandPickDistance =
+                _hasOrigCommandPickDist ? _origCommandPickDist : 2000.0f;
+            filterIn.vanillaCommandPickRadius =
+                _hasOrigCommandPickRadius ? _origCommandPickRadius : 24.0f;
+            filterIn.vanillaActivatePickRadius =
+                _hasOrigActivatePickRadius ? _origActivatePickRadius : 16.0f;
+
+            companionDecision = EvaluateCompanionFilter(filterIn);
+            if (companionDecision.restoreVanillaSettings) {
+                RestoreCompanionEngineSettings();
+            } else {
+                ApplyCompanionEngineSettings(
+                    companionDecision.desiredCommandPickDistance,
+                    companionDecision.desiredCommandPickRadius);
+            }
+        } else {
+            _lastQuickLootActiveMs = 0;
+            RestoreCompanionEngineSettings();
+        }
+
+        _suppressCompanionActivate.store(companionDecision.suppressTarget, std::memory_order_release);
+
         bool changed = false;
         OverlaySnapshot nextOverlay{};
 
@@ -3064,12 +3766,14 @@ namespace HUDController
             in.deltaSeconds = a_timeDelta;
             in.quickContainerVisible = clips.quickContainerVisible;
             in.hideNativeClip = modernRolloverActive;
+            in.suppressTarget = companionDecision.suppressTarget;
 
             in.rolloverVisible = clips.rolloverRawVisible;
             in.nativeClipVisible = clips.rolloverRawVisible;
             ReadClipBaseTransform(clips.rollover, in);
 
-            if (in.enabled && !bypassActive && !in.quickContainerVisible && in.rolloverVisible && targetRef && cam) {
+            if (in.enabled && !bypassActive && !in.quickContainerVisible && in.rolloverVisible &&
+                !companionDecision.suppressTarget && targetRef && cam) {
                 in.hasTarget = true;
                 const RE::NiPoint3 worldAnchor =
                     ResolveStableAnchorWorldPosition(targetRef, targeted3DHint, cfg);
@@ -3082,14 +3786,15 @@ namespace HUDController
             const auto out = _state.Step(in);
             if (ApplyTransformToClip(movie, clips.rolloverParent, clips.rollover, out)) {
                 changed = true;
-            } else if (modernRolloverActive && clips.rolloverRawVisible &&
+            } else if ((modernRolloverActive || companionDecision.suppressTarget) && clips.rolloverRawVisible &&
                        out.action == HUDAction::kNoOp && _state.IsHidingAlpha()) {
                 clips.rollover.SetMember("alpha"sv, RE::Scaleform::GFx::Value(0.0));
                 changed = true;
             }
 
             const bool rolloverFloatingVisible =
-                (out.action == HUDAction::kApplyFloat && in.projectedTarget.visible &&
+                (!companionDecision.suppressTarget &&
+                 out.action == HUDAction::kApplyFloat && in.projectedTarget.visible &&
                  !clips.quickContainerVisible && targetRef && stageW > 0.0f && stageH > 0.0f);
 
             if (!rolloverFloatingVisible || clips.quickContainerVisible || bypassActive || !cfg.enabled) {

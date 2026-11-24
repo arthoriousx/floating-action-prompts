@@ -22,6 +22,12 @@ struct ConfigData
     bool enableClamping{ true };
     float edgeMargin{ 40.0f };
 
+    // Companion prompt distance & focus protection ([General])
+    bool limitCompanionPromptDistance{ true };
+    float companionMaxDistance{ 160.0f };
+    float companionCombatMaxDistance{ 80.0f };
+    bool companionDeprioritizeLoot{ true };
+
     // Context-aware 3D Offsets (world units)
     Vector3 doorOffset{ 0.0f, 0.0f, -20.0f };
     Vector3 npcOffset{ 0.0f, 0.0f, 10.0f };

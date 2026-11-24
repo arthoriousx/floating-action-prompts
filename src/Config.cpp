@@ -102,6 +102,8 @@ namespace
 
         ClampFinite(a_data.smoothingSpeed, 0.05f, 1.0f, defaults.smoothingSpeed);
         ClampFinite(a_data.edgeMargin, 0.0f, 400.0f, defaults.edgeMargin);
+        ClampFinite(a_data.companionMaxDistance, 50.0f, 500.0f, defaults.companionMaxDistance);
+        ClampFinite(a_data.companionCombatMaxDistance, 0.0f, 500.0f, defaults.companionCombatMaxDistance);
 
         ClampOffset(a_data.doorOffset, defaults.doorOffset);
         ClampOffset(a_data.npcOffset, defaults.npcOffset);
@@ -211,6 +213,10 @@ namespace
                     else if (key == "bPowerArmorBypass") a_target.powerArmorBypass = ParseBool(valStr);
                     else if (key == "bEnableClamping") a_target.enableClamping = ParseBool(valStr);
                     else if (key == "fEdgeMargin") a_target.edgeMargin = std::stof(valStr);
+                    else if (key == "bLimitCompanionPromptDistance") a_target.limitCompanionPromptDistance = ParseBool(valStr);
+                    else if (key == "fCompanionMaxDistance") a_target.companionMaxDistance = std::stof(valStr);
+                    else if (key == "fCompanionCombatMaxDistance") a_target.companionCombatMaxDistance = std::stof(valStr);
+                    else if (key == "bCompanionDeprioritizeLoot") a_target.companionDeprioritizeLoot = ParseBool(valStr);
                 } else if (currentSection == "Offsets") {
                     if (key == "fDoorOffsetX") a_target.doorOffset.x = std::stof(valStr);
                     else if (key == "fDoorOffsetY") a_target.doorOffset.y = std::stof(valStr);
@@ -347,7 +353,11 @@ namespace
         file << "fSmoothingSpeed=" << a_data.smoothingSpeed << "\n";
         file << "bPowerArmorBypass=" << (a_data.powerArmorBypass ? 1 : 0) << "\n";
         file << "bEnableClamping=" << (a_data.enableClamping ? 1 : 0) << "\n";
-        file << "fEdgeMargin=" << a_data.edgeMargin << "\n\n";
+        file << "fEdgeMargin=" << a_data.edgeMargin << "\n";
+        file << "bLimitCompanionPromptDistance=" << (a_data.limitCompanionPromptDistance ? 1 : 0) << "\n";
+        file << "fCompanionMaxDistance=" << a_data.companionMaxDistance << "\n";
+        file << "fCompanionCombatMaxDistance=" << a_data.companionCombatMaxDistance << "\n";
+        file << "bCompanionDeprioritizeLoot=" << (a_data.companionDeprioritizeLoot ? 1 : 0) << "\n\n";
 
         file << "[Offsets]\n";
         file << "fDoorOffsetX=" << a_data.doorOffset.x << "\n";
