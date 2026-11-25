@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -39,7 +40,7 @@ namespace HUDController
     {
         bool enabled{ true };
         bool inPowerArmor{ false };
-        bool powerArmorBypass{ true };
+        bool powerArmorBypass{ false };
         bool quickContainerVisible{ false };
         bool rolloverVisible{ false };
         bool nativeClipVisible{ false };
@@ -82,8 +83,18 @@ namespace HUDController
     };
 
     inline constexpr std::int64_t kQuickLootCompanionGraceMs = 600;
+    inline constexpr std::int64_t kPostLootGrabBlockMs = 700;
+    inline constexpr std::int64_t kPostLootEmptyBlockMs = 450;
 
     [[nodiscard]] bool IsHealActionVerb(std::string_view a_verb) noexcept;
+    [[nodiscard]] bool IsCrimeActionVerb(std::string_view a_verb) noexcept;
+    [[nodiscard]] bool ShouldBlockPostLootActivate(
+        std::int64_t a_nowMs,
+        std::int64_t a_lastTakeMs,
+        std::int64_t a_lastEmptyMs,
+        bool a_isJustPressed,
+        bool a_isHeld,
+        bool a_isAlreadyGrabbing) noexcept;
     [[nodiscard]] bool UpdateQuickLootCompanionProtection(
         std::int64_t& a_lastQuickLootActiveMs,
         bool a_quickContainerVisible,
@@ -114,6 +125,24 @@ namespace HUDController
         std::uint64_t stackSignature{ 0 };
         std::uint32_t value{ 0 };
         float weight{ 0.0f };
+        std::uint32_t baseFormID{ 0 };
+        QuickLootCategory quickLootCategory{ QuickLootCategory::Misc };
+        bool isQuestItem{ false };
+        bool isCaps{ false };
+        bool isTemporary{ false };
+    };
+
+    struct QuickLootSortConfig
+    {
+        int sortMode{ 0 };
+        int categorySecondarySort{ 0 };
+        bool pinQuestItems{ true };
+        bool pinLegendary{ true };
+        bool pinTaggedForSearch{ true };
+        bool pinCaps{ true };
+        std::array<int, kQuickLootCategoryCount> categoryOrder{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18 };
+
+        [[nodiscard]] static QuickLootSortConfig FromConfig(const ConfigData& a_cfg) noexcept;
     };
 
     struct QuickContainerMergeResult
@@ -135,6 +164,7 @@ namespace HUDController
         bool active{ false };
         bool docked{ false };
         bool isWorkbench{ false };
+        bool isCrime{ false };
         float normScreenX{ 0.5f };
         float normScreenY{ 0.5f };
         float edgeFade{ 1.0f };
@@ -156,6 +186,7 @@ namespace HUDController
     {
         bool visible{ false };
         bool quickContainerVisible{ false };
+        bool isCrime{ false };
         float normScreenX{ 0.5f };
         float normScreenY{ 0.5f };
         float edgeFade{ 1.0f };
@@ -217,6 +248,137 @@ namespace HUDController
         float& a_outLocalY) noexcept;
 
     void AggregateItemStacks(std::vector<QuickContainerItemEntry>& a_stacks);
+
+    void SortQuickContainerItems(
+        std::vector<QuickContainerItemEntry>& a_items,
+        const QuickLootSortConfig& a_cfg);
+
+    [[nodiscard]] QuickLootCategory ClassifyWeaponQuickLootCategory(
+        std::uint8_t a_weaponType,
+        bool a_hasGrenadeOrMineKw,
+        bool a_hasHeavyKw,
+        bool a_hasExplosiveKw,
+        bool a_hasMeleeKw,
+        bool a_hasPistolKw,
+        bool a_hasRifleOrShotgunKw) noexcept;
+
+    [[nodiscard]] QuickLootCategory ClassifyArmorQuickLootCategory(
+        bool a_hasPowerArmorKw,
+        bool a_hasArmorKw,
+        bool a_hasClothingKw,
+        std::uint16_t a_armorRating,
+        bool a_hasExtraResist) noexcept;
+
+    [[nodiscard]] QuickLootCategory ClassifyAidQuickLootCategory(
+        bool a_isMedicineFlag,
+        bool a_isFoodFlag,
+        bool a_hasMedicineKw,
+        bool a_hasChemKw,
+        bool a_hasDrinkKw,
+        bool a_hasFoodKw,
+        bool a_hasAddiction) noexcept;
+
+    [[nodiscard]] bool IsQuickContainerWorkbenchTarget(
+        TargetInfo::ItemKind a_targetKind,
+        bool a_engineValid,
+        bool a_isPowerArmorMode,
+        bool a_isCraftingOrWorkshopMode) noexcept;
+
+    [[nodiscard]] std::int32_t StepCustomQuickLootSelection(
+        std::int32_t a_currentIndex,
+        std::int32_t a_delta,
+        std::int32_t a_itemCount) noexcept;
+
+    struct QuickLootTakeLatchState
+    {
+        bool latched{ false };
+        bool hasBoundKey{ false };
+        std::uint32_t boundDevice{ 0xFFFFFFFFu };
+        std::uint32_t boundIdCode{ 0xFFFFFFFFu };
+        std::int64_t lastTakePressMs{ 0 };
+        std::int64_t lastReleaseMs{ 0 };
+        std::int64_t latchSetMs{ 0 };
+    };
+
+    struct QuickLootTakePassState
+    {
+        bool acceptedTakeThisPass{ false };
+        bool unlatchedThisPass{ false };
+        std::uint32_t unlatchedDevice{ 0xFFFFFFFFu };
+        std::uint32_t unlatchedIdCode{ 0xFFFFFFFFu };
+    };
+
+    struct QuickLootTakeInput
+    {
+        std::uint32_t device{ 0xFFFFFFFFu };
+        std::uint32_t idCode{ 0xFFFFFFFFu };
+        bool isTakeFamily{ false };
+        bool isJustPressed{ false };
+        bool isPressed{ false };
+        bool isReleased{ false };
+        bool canTake{ false };
+        bool suppressTakeFamilyPress{ false };
+    };
+
+    struct QuickLootTakeInputDecision
+    {
+        bool acceptTake{ false };
+        bool swallowEvent{ false };
+    };
+
+    [[nodiscard]] QuickLootTakeInputDecision StepQuickLootTakeLatch(
+        QuickLootTakeLatchState& a_state,
+        QuickLootTakePassState& a_pass,
+        const QuickLootTakeInput& a_in,
+        std::int64_t a_nowMs,
+        std::int64_t a_debounceMs = 100,
+        std::int64_t a_staleLatchTimeoutMs = 1500) noexcept;
+
+    struct SuppressedReadyInput
+    {
+        bool isSecondaryActivate{ false };
+        bool isReadyWeapon{ false };
+        bool isQcTransfer{ false };
+        bool isJustPressed{ false };
+        bool isPressed{ false };
+        bool isReleased{ false };
+        float heldDownSecs{ 0.0f };
+        bool blockCompanionReady{ false };
+        bool blockOrphanSecondary{ false };
+        bool passHasBlockedSecondary{ false };
+        bool canCustomReadyAction{ false };
+        bool weaponDrawn{ false };
+        bool alreadyHandledThisPass{ false };
+    };
+
+    enum class SuppressedReadyAction : std::uint8_t
+    {
+        kNone = 0,
+        kDraw,
+        kReload,
+        kSheath
+    };
+
+    struct SuppressedReadyDecision
+    {
+        bool swallowEvent{ false };
+        bool consumedPass{ false };
+        SuppressedReadyAction action{ SuppressedReadyAction::kNone };
+    };
+
+    struct SuppressedReadyState
+    {
+        bool held{ false };
+        bool holstered{ false };
+        std::int64_t startMs{ 0 };
+    };
+
+    [[nodiscard]] SuppressedReadyDecision StepSuppressedSecondaryReady(
+        SuppressedReadyState& a_state,
+        const SuppressedReadyInput& a_in,
+        std::int64_t a_nowMs,
+        float a_holsterHoldSecs = 0.35f,
+        std::int64_t a_staleHoldTimeoutMs = 2000) noexcept;
 
     [[nodiscard]] QuickContainerMergeResult MergeQuickContainerInventory(
         const std::vector<QuickContainerItemEntry>& a_engineWindow,
@@ -293,6 +455,10 @@ namespace HUDController
         void Install();
         void EnsurePickRefSink();
         void EnsureActivateHook();
+        void EnsurePlayerControlsHooks();
+        void EnsureMenuControlsHook();
+        void EnsureUIInputHook();
+        void EnsureHUDDataModelHook();
         [[nodiscard]] bool ShouldBlockCompanionActivation() const noexcept;
         void ClearPickedRef();
         void ResetState();
@@ -342,17 +508,77 @@ namespace HUDController
         void ResolveCompanionEngineSettings();
         void ApplyCompanionEngineSettings(float a_dist, float a_radius);
         void RestoreCompanionEngineSettings();
+        void ResolveGrabDelaySetting();
+        void ApplyGrabDelaySetting(float a_delaySec);
+        void RestoreGrabDelaySetting();
         static void Hook_AdvanceMovie(RE::IMenu* a_this, float a_timeDelta, std::uint64_t a_time);
         static bool Hook_ActivateShouldHandleEvent(RE::BSInputEventUser* a_this, const RE::InputEvent* a_event);
+        static bool Hook_ReadyWeaponShouldHandleEvent(RE::BSInputEventUser* a_this, const RE::InputEvent* a_event);
+        static void Hook_MenuControlsPerformInputProcessing(RE::BSInputEventReceiver* a_this, const RE::InputEvent* a_queueHead);
+        static void Hook_PlayerControlsPerformInputProcessing(RE::BSInputEventReceiver* a_this, const RE::InputEvent* a_queueHead);
+        static void Hook_UIPerformInputProcessing(RE::BSInputEventReceiver* a_this, const RE::InputEvent* a_queueHead);
+        static void Hook_HUDDataModelPerformInputProcessing(RE::BSInputEventReceiver* a_this, const RE::InputEvent* a_queueHead);
+        [[nodiscard]] static SuppressedReadyAction ProcessInputEventQueue(
+            const RE::InputEvent* a_queueHead,
+            const char* a_sourceTag);
+        static void ExecuteReadyWeaponAction(SuppressedReadyAction a_action, const char* a_sourceTag);
+        static void LogSuppressedReadyDiag(
+            const char* a_sourceTag,
+            const char* a_reason,
+            std::string_view a_userEvent,
+            bool a_blockCompReady,
+            bool a_blockOrphanSec,
+            bool a_weaponDrawn,
+            int a_actionResult = -1);
+
+        [[nodiscard]] bool ExecuteCustomQuickLootTake(
+            RE::TESObjectREFR* a_invOwner,
+            RE::PlayerCharacter* a_player,
+            RE::QuickContainerMode a_mode,
+            const QuickContainerItemEntry& a_target);
 
         inline static REL::Relocation<decltype(&Hook_AdvanceMovie)> _AdvanceMovie;
         inline static std::atomic<std::uintptr_t> _origActivateShouldHandleEvent{ 0 };
+        inline static std::atomic<std::uintptr_t> _origReadyWeaponShouldHandleEvent{ 0 };
+        inline static std::atomic<std::uintptr_t> _origMenuControlsPerformInputProcessing{ 0 };
+        inline static std::atomic<std::uintptr_t> _origPlayerControlsPerformInputProcessing{ 0 };
+        inline static std::atomic<std::uintptr_t> _origUIPerformInputProcessing{ 0 };
+        inline static std::atomic<std::uintptr_t> _origHUDDataModelPerformInputProcessing{ 0 };
         std::atomic<bool> _hooked{ false };
         std::atomic<bool> _installed{ false };
         std::atomic<bool> _pickSinkRegistered{ false };
         std::atomic<bool> _activateHooked{ false };
+        std::atomic<bool> _menuControlsInputHooked{ false };
+        std::atomic<bool> _playerControlsInputHooked{ false };
+        std::atomic<bool> _readyWeaponHooked{ false };
+        std::atomic<bool> _uiInputHooked{ false };
+        std::atomic<bool> _hudDataModelInputHooked{ false };
         std::atomic<bool> _activateIsHeldStateHandler{ false };
+        std::atomic<bool> _readyWeaponIsHeldStateHandler{ false };
         std::atomic<bool> _suppressCompanionActivate{ false };
+        std::atomic<bool> _suppressCompanionReady{ false };
+        std::atomic<bool> _blockOrphanSecondaryActivate{ false };
+        std::atomic<bool> _suppressedReadyHeld{ false };
+        std::atomic<bool> _suppressedReadyHolstered{ false };
+        std::atomic<std::int64_t> _suppressedReadyStartMs{ 0 };
+        std::atomic<std::int64_t> _lastQuickLootTakeMs{ 0 };
+        std::atomic<std::int64_t> _lastQuickLootEmptyMs{ 0 };
+        std::atomic<bool> _customQcActive{ false };
+        std::atomic<bool> _customQcTakeEnabled{ false };
+        std::atomic<std::int32_t> _customQcPendingScrollDelta{ 0 };
+        std::atomic<bool> _customQcTakeRequested{ false };
+        std::atomic<bool> _customQcTakeLatched{ false };
+        std::atomic<std::int64_t> _customQcLastTakePressMs{ 0 };
+        std::atomic<std::int64_t> _customQcLastReleaseMs{ 0 };
+        std::atomic<std::int64_t> _customQcLatchSetMs{ 0 };
+        std::atomic<std::int64_t> _customQcTakeDebounceMs{ 0 };
+        std::atomic<std::uint32_t> _customQcTakeDevice{ 0xFFFFFFFFu };
+        std::atomic<std::uint32_t> _customQcTakeIdCode{ 0xFFFFFFFFu };
+        std::atomic<std::uint64_t> _inputResetEpoch{ 0 };
+        std::atomic<std::int64_t> _customQcLastRepeatMs{ 0 };
+        std::atomic<std::uint32_t> _diagReadyBlockLogCount{ 0 };
+        std::atomic<std::int64_t> _diagReadyLastLogMs{ 0 };
+        std::atomic<std::int64_t> _diagReadyLastActionLogMs{ 0 };
         std::atomic<bool> _pendingReset{ false };
         std::atomic<bool> _pendingQcInvalidate{ false };
 
@@ -367,6 +593,10 @@ namespace HUDController
         float _origCommandPickRadius{ 24.0f };
         float _origActivatePickRadius{ 16.0f };
         std::int64_t _lastQuickLootActiveMs{ 0 };
+        bool _grabSettingResolved{ false };
+        RE::Setting* _iniGrabHoldDelay{ nullptr };
+        bool _hasOrigGrabHoldDelay{ false };
+        float _origGrabHoldDelay{ 0.30f };
 
         mutable std::mutex _pickMutex;
         RE::ObjectRefHandle _pickedRefHandle{};
@@ -405,6 +635,9 @@ namespace HUDController
 
         CachedInventorySnapshot _cachedInvSnapshot{};
         QuickContainerMergeCache _cachedMerge{};
+        std::uint32_t _customQcOwnerFormID{ 0 };
+        std::int32_t _customQcSelectedIndex{ 0 };
+        std::vector<QuickContainerItemEntry> _customQcSortedItems{};
 
         std::atomic<std::uintptr_t> _hoverTargetKey{ 0 };
         std::atomic<std::int64_t> _hoverFirstSeenMs{ 0 };

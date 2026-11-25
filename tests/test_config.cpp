@@ -21,13 +21,15 @@ int main()
         const ConfigData snap = cfg.GetSnapshot();
         CHECK(snap.enabled == true);
         CHECK_NEAR(snap.smoothingSpeed, 0.25f, 0.0001f);
-        CHECK(snap.powerArmorBypass == true);
+        CHECK(snap.powerArmorBypass == false);
         CHECK(snap.enableClamping == true);
         CHECK_NEAR(snap.edgeMargin, 40.0f, 0.0001f);
         CHECK(snap.limitCompanionPromptDistance == true);
-        CHECK_NEAR(snap.companionMaxDistance, 160.0f, 0.0001f);
+        CHECK_NEAR(snap.companionMaxDistance, 120.0f, 0.0001f);
         CHECK_NEAR(snap.companionCombatMaxDistance, 80.0f, 0.0001f);
         CHECK(snap.companionDeprioritizeLoot == true);
+        CHECK(snap.blockHiddenCompanionInteractions == true);
+        CHECK_NEAR(snap.grabHoldDelay, 1.50f, 0.0001f);
 
         CHECK_NEAR(snap.doorOffset.x, 0.0f, 0.0001f);
         CHECK_NEAR(snap.doorOffset.y, 0.0f, 0.0001f);
@@ -77,6 +79,8 @@ int main()
         CHECK(snap.modernNameColor == 0xE0E8F0u);
         CHECK(snap.modernIconColor == 0xFFFFFFu);
         CHECK(snap.modernAccentColor == 0xF6C86Eu);
+        CHECK(snap.highlightCrimePrompts == true);
+        CHECK(snap.crimeTextColor == 0xFF4D4Du);
 
         CHECK(snap.infoCardPosition == 3);
         CHECK_NEAR(snap.infoCardOffsetX, 16.0f, 0.0001f);
@@ -123,6 +127,14 @@ int main()
         CHECK_NEAR(snap.qcButtonTextScale, 0.95f, 0.0001f);
         CHECK(snap.qcShowItemIcons == true);
         CHECK(snap.qcFont.empty());
+        CHECK(snap.qcSortMode == 0);
+        CHECK(snap.qcCategorySecondarySort == 0);
+        CHECK(snap.qcPinQuestItems == true);
+        CHECK(snap.qcPinLegendary == true);
+        CHECK(snap.qcPinTaggedForSearch == true);
+        CHECK(snap.qcPinCaps == true);
+        CHECK(snap.qcTakeDebounceMs == 0);
+        CHECK(snap.qcCategoryOrder == DefaultQuickLootCategoryOrder());
 
         CHECK(!cfg.HasUnsavedChanges());
     }
@@ -134,6 +146,8 @@ int main()
         edit.edgeMargin = -10.0f;
         edit.companionMaxDistance = 10.0f;
         edit.companionCombatMaxDistance = -5.0f;
+        edit.grabHoldDelay = 0.05f;
+        edit.crimeTextColor = 0xFFAA1122u;
         edit.doorOffset.z = -35.0f;
         edit.furnitureOffset = { -250.0f, 300.0f, 999.0f };
         edit.promptStyle = 99;
@@ -166,20 +180,34 @@ int main()
         edit.qcWidth = 900.0f;
         edit.qcMaxVisibleRows = 50;
         edit.qcKeyTextScale = 9.0f;
+        edit.qcSortMode = 99;
+        edit.qcCategorySecondarySort = -4;
+        edit.qcTakeDebounceMs = 999;
+        edit.qcCategoryOrder = { 18, 18, -1, 7, 40, 0, 0, 14, 14, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11 };
         cfg.ApplySnapshot(edit, true);
 
         CHECK(cfg.HasUnsavedChanges());
         const ConfigData clamped = cfg.GetSnapshot();
+        CHECK(clamped.qcSortMode == 6);
+        CHECK(clamped.qcCategorySecondarySort == 0);
+        CHECK(clamped.qcTakeDebounceMs == 300);
+        CHECK(clamped.qcCategoryOrder == (std::array<int, kQuickLootCategoryCount>{ 18, 7, 0, 14, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 15, 16, 17 }));
         CHECK_NEAR(clamped.smoothingSpeed, 0.05f, 0.0001f);
         CHECK_NEAR(clamped.edgeMargin, 0.0f, 0.0001f);
         CHECK_NEAR(clamped.companionMaxDistance, 50.0f, 0.0001f);
         CHECK_NEAR(clamped.companionCombatMaxDistance, 0.0f, 0.0001f);
+        CHECK_NEAR(clamped.grabHoldDelay, 0.30f, 0.0001f);
+        CHECK(clamped.crimeTextColor == 0xAA1122u);
 
         edit.companionMaxDistance = 999.0f;
         edit.companionCombatMaxDistance = 999.0f;
+        edit.grabHoldDelay = 9.0f;
+        edit.qcTakeDebounceMs = -50;
         cfg.ApplySnapshot(edit, true);
         CHECK_NEAR(cfg.GetSnapshot().companionMaxDistance, 500.0f, 0.0001f);
         CHECK_NEAR(cfg.GetSnapshot().companionCombatMaxDistance, 500.0f, 0.0001f);
+        CHECK_NEAR(cfg.GetSnapshot().grabHoldDelay, 2.00f, 0.0001f);
+        CHECK(cfg.GetSnapshot().qcTakeDebounceMs == 0);
         CHECK_NEAR(clamped.doorOffset.z, -35.0f, 0.0001f);
         CHECK_NEAR(clamped.furnitureOffset.x, -200.0f, 0.0001f);
         CHECK_NEAR(clamped.furnitureOffset.y, 200.0f, 0.0001f);
@@ -232,6 +260,10 @@ int main()
         edit.companionMaxDistance = 240.0f;
         edit.companionCombatMaxDistance = 40.0f;
         edit.companionDeprioritizeLoot = false;
+        edit.blockHiddenCompanionInteractions = false;
+        edit.grabHoldDelay = 1.25f;
+        edit.highlightCrimePrompts = false;
+        edit.crimeTextColor = 0xCC3311u;
         edit.doorOffset.z = -35.0f;
         edit.furnitureOffset = { 1.5f, -3.5f, 12.0f };
         edit.promptStyle = 1;
@@ -283,6 +315,14 @@ int main()
         edit.qcKeyTextScale = 0.74f;
         edit.qcButtonTextScale = 1.15f;
         edit.qcShowItemIcons = false;
+        edit.qcSortMode = 2;
+        edit.qcCategorySecondarySort = 3;
+        edit.qcPinQuestItems = false;
+        edit.qcPinLegendary = true;
+        edit.qcPinTaggedForSearch = false;
+        edit.qcPinCaps = false;
+        edit.qcTakeDebounceMs = 140;
+        edit.qcCategoryOrder = { 18, 17, 7, 5, 0, 1, 2, 3, 4, 6, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
         edit.promptFont = "  segoeui.ttf\r\n";
         edit.qcFont = std::string(300, 'a') + ".ttf";
         edit.infoCardFont = "consola.ttf";
@@ -297,6 +337,10 @@ int main()
         CHECK_NEAR(loaded.companionMaxDistance, 240.0f, 0.0001f);
         CHECK_NEAR(loaded.companionCombatMaxDistance, 40.0f, 0.0001f);
         CHECK(loaded.companionDeprioritizeLoot == false);
+        CHECK(loaded.blockHiddenCompanionInteractions == false);
+        CHECK_NEAR(loaded.grabHoldDelay, 1.25f, 0.0001f);
+        CHECK(loaded.highlightCrimePrompts == false);
+        CHECK(loaded.crimeTextColor == 0xCC3311u);
         CHECK_NEAR(loaded.doorOffset.z, -35.0f, 0.0001f);
         CHECK_NEAR(loaded.furnitureOffset.x, 1.5f, 0.0001f);
         CHECK_NEAR(loaded.furnitureOffset.y, -3.5f, 0.0001f);
@@ -354,9 +398,36 @@ int main()
         CHECK_NEAR(loaded.qcKeyTextScale, 0.74f, 0.0001f);
         CHECK_NEAR(loaded.qcButtonTextScale, 1.15f, 0.0001f);
         CHECK(loaded.qcShowItemIcons == false);
+        CHECK(loaded.qcSortMode == 2);
+        CHECK(loaded.qcCategorySecondarySort == 3);
+        CHECK(loaded.qcPinQuestItems == false);
+        CHECK(loaded.qcPinLegendary == true);
+        CHECK(loaded.qcPinTaggedForSearch == false);
+        CHECK(loaded.qcPinCaps == false);
+        CHECK(loaded.qcTakeDebounceMs == 140);
+        CHECK(loaded.qcCategoryOrder == (std::array<int, kQuickLootCategoryCount>{ 18, 17, 7, 5, 0, 1, 2, 3, 4, 6, 8, 9, 10, 11, 12, 13, 14, 15, 16 }));
         CHECK(loaded.promptFont == "segoeui.ttf");
         CHECK(loaded.qcFont.size() == 260);
         CHECK(loaded.infoCardFont == "consola.ttf");
+
+        // CSV parsing, legacy group migration & sanitization for 19-category sQcCategoryOrder
+        {
+            const auto parsedCsv = ParseQuickLootCategoryOrder("Misc, Pistol, pistol, Invalid, 0, Key");
+            CHECK(parsedCsv == (std::array<int, kQuickLootCategoryCount>{ 17, 7, 0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18 }));
+            CHECK(FormatQuickLootCategoryOrder(parsedCsv) == "Misc,Pistol,Key,Medicine,Chem,Drink,Food,Ammo,Explosive,Rifle,HeavyWeapon,Melee,PowerArmor,Armor,Clothing,Mod,BookNote,Holotape,Junk");
+
+            const auto legacyCsv = ParseQuickLootCategoryOrder("Key,Aid,Ammo,Weapon,Armor,Mod,BookNote,Holotape,Misc,Junk");
+            CHECK(legacyCsv == DefaultQuickLootCategoryOrder());
+
+            const auto explicitArmorCsv = ParseQuickLootCategoryOrder("Clothing,Armor,PowerArmor,Key");
+            CHECK(explicitArmorCsv == (std::array<int, kQuickLootCategoryCount>{ 13, 12, 11, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 14, 15, 16, 17, 18 }));
+
+            const auto numericCsv = ParseQuickLootCategoryOrder("18, 11, 0");
+            CHECK(numericCsv == (std::array<int, kQuickLootCategoryCount>{ 18, 11, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 13, 14, 15, 16, 17 }));
+
+            const auto dupCsv = ParseQuickLootCategoryOrder("Key,Key,Key,Key,Key,Key,Key,Key,Key,Key,Key,Key,Key,Key,Key,Key,Key,Key,Key,Misc,Junk");
+            CHECK(dupCsv == (std::array<int, kQuickLootCategoryCount>{ 0, 17, 18, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 }));
+        }
 
         {
             std::ofstream bad(tempDir / "bad.ini");
@@ -405,6 +476,7 @@ int main()
 
         cfg.LoadFromPaths(defIni, plugIni, userIni);
         const auto merged = cfg.GetSnapshot();
+        CHECK(merged.powerArmorBypass == true);            // from default
         CHECK_NEAR(merged.itemOffset.z, 5.0f, 0.0001f);      // from default
         CHECK_NEAR(merged.smoothingSpeed, 0.35f, 0.0001f); // overridden by plugin
         CHECK_NEAR(merged.doorOffset.z, -40.0f, 0.0001f);  // overridden by user
@@ -431,7 +503,7 @@ int main()
         }
         CHECK(cfg.Load(tempDir / "edge_values.ini"));
         const auto edgeCfg = cfg.GetSnapshot();
-        CHECK_NEAR(edgeCfg.companionMaxDistance, 160.0f, 0.0001f);
+        CHECK_NEAR(edgeCfg.companionMaxDistance, 120.0f, 0.0001f);
         CHECK_NEAR(edgeCfg.companionCombatMaxDistance, 80.0f, 0.0001f);
         CHECK(edgeCfg.modernBgColor == 0x0E1116u);
         CHECK(edgeCfg.modernAccentColor == 0xF6C86Eu);

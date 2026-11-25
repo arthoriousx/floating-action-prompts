@@ -5,6 +5,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdint>
 #include <d3d11.h>
 #include <filesystem>
@@ -26,6 +27,7 @@ namespace MenuFrameworkUI
     {
         std::string g_statusMessage;
         F4SEMenuFramework::Model::HudElement* g_hudElement{ nullptr };
+        std::atomic<bool> g_frameworkInstalled{ false };
         std::atomic<bool> g_hudOverlayActive{ false };
         std::atomic<bool> g_drawImageSupported{ false };
         std::atomic<bool> g_circlePrimitivesSupported{ false };
@@ -1530,6 +1532,11 @@ namespace MenuFrameworkUI
                     a_dl, pMin, pMax, MakeRgbCol(a_cfg.modernBorderColor, 0.35f * overallAlpha), rounding, 0, 1.0f);
             }
 
+            const bool useCrimeColor = a_cfg.highlightCrimePrompts && a_snap.isCrime;
+            const std::uint32_t actionTextRgb = useCrimeColor ? a_cfg.crimeTextColor : a_cfg.modernTextColor;
+            const std::uint32_t targetNameRgb = useCrimeColor ? a_cfg.crimeTextColor : a_cfg.modernNameColor;
+            const std::uint32_t doorHeaderRgb = useCrimeColor ? a_cfg.crimeTextColor : a_cfg.modernAccentColor;
+
             auto drawSingleAction = [&](std::size_t a_idx, float a_startX, float a_centerY) {
                 const float alphaMult = actions[a_idx].enabled ? 1.0f : 0.45f;
                 const float rowAlpha = overallAlpha * alphaMult;
@@ -1568,7 +1575,7 @@ namespace MenuFrameworkUI
                 DrawTextShadowed(
                     a_dl, a_baseFont, actionFontSize,
                     { cx, a_centerY - verbSzs[a_idx].y * 0.5f },
-                    MakeRgbCol(a_cfg.modernTextColor, rowAlpha),
+                    MakeRgbCol(actionTextRgb, rowAlpha),
                     rowAlpha, a_cfg.modernTextShadow, scale, actions[a_idx].label.c_str());
                 cx += verbSzs[a_idx].x;
 
@@ -1578,12 +1585,12 @@ namespace MenuFrameworkUI
                         a_dl,
                         { midX, a_centerY - rowHeights[0] * 0.30f },
                         { midX, a_centerY + rowHeights[0] * 0.30f },
-                        MakeRgbCol(a_cfg.modernNameColor, 0.35f * rowAlpha), 1.0f);
+                        MakeRgbCol(targetNameRgb, 0.35f * rowAlpha), 1.0f);
                     cx += sepW;
                     DrawTextShadowed(
                         a_dl, a_baseFont, actionFontSize,
                         { cx, a_centerY - nameSz.y * 0.5f },
-                        MakeRgbCol(a_cfg.modernNameColor, 0.96f * rowAlpha),
+                        MakeRgbCol(targetNameRgb, 0.96f * rowAlpha),
                         rowAlpha, a_cfg.modernTextShadow, scale, name.c_str());
                 }
             };
@@ -1594,7 +1601,7 @@ namespace MenuFrameworkUI
                 const float headerX = stacked ? (x + padX) : (x + (pillW - doorHeaderSz.x) * 0.5f);
                 DrawTextShadowed(
                     a_dl, a_baseFont, doorHeaderFontSize, { headerX, contentTopY },
-                    MakeRgbCol(a_cfg.modernAccentColor, overallAlpha),
+                    MakeRgbCol(doorHeaderRgb, overallAlpha),
                     overallAlpha, useHeaderShadow, scale, doorHeader.c_str());
                 contentTopY += doorHeaderBlockH;
             }
@@ -1698,6 +1705,8 @@ namespace MenuFrameworkUI
 
             const std::string header = TargetInfo::ToUpperAscii(
                 TargetInfo::CleanDisplayName(qc.headerTitle, a_cfg.cleanSorterTags));
+            const bool useCrimeColor = a_cfg.highlightCrimePrompts && qc.isCrime;
+            const std::uint32_t qcBtnTextRgb = useCrimeColor ? a_cfg.crimeTextColor : a_cfg.modernTextColor;
 
             std::vector<HUDController::ButtonHintEntry> buttons = qc.buttons;
             if (buttons.empty()) {
@@ -1787,9 +1796,10 @@ namespace MenuFrameworkUI
                 const bool useTextShadow = a_cfg.modernTextShadow || bgAlpha < 0.2f;
                 if (!header.empty()) {
                     const float titleX = stacked ? (x + padX) : (x + (boxW - titleSz.x) * 0.5f);
+                    const std::uint32_t emptyTitleRgb = useCrimeColor ? a_cfg.crimeTextColor : a_cfg.modernAccentColor;
                     DrawTextShadowed(
                         a_dl, a_baseFont, titleFontSize, { titleX, curY },
-                        MakeRgbCol(a_cfg.modernAccentColor, overallAlpha),
+                        MakeRgbCol(emptyTitleRgb, overallAlpha),
                         overallAlpha, useTextShadow, qcScale, header.c_str());
                     curY += titleBlockH;
                 }
@@ -1806,7 +1816,7 @@ namespace MenuFrameworkUI
                         curX += keySpans[i] + itemGap;
                         DrawTextShadowed(
                             a_dl, a_baseFont, btnLabelFontSize, { curX, btnCenterY - labelSzs[i].y * 0.5f },
-                            MakeRgbCol(a_cfg.modernTextColor, overallAlpha * alphaMult),
+                            MakeRgbCol(qcBtnTextRgb, overallAlpha * alphaMult),
                             overallAlpha * alphaMult, useTextShadow, qcScale, buttons[i].label.c_str());
                         curY += singleBtnH + actionGap;
                     }
@@ -1822,7 +1832,7 @@ namespace MenuFrameworkUI
                         curX += keySpans[i] + itemGap;
                         DrawTextShadowed(
                             a_dl, a_baseFont, btnLabelFontSize, { curX, btnCenterY - labelSzs[i].y * 0.5f },
-                            MakeRgbCol(a_cfg.modernTextColor, overallAlpha * alphaMult),
+                            MakeRgbCol(qcBtnTextRgb, overallAlpha * alphaMult),
                             overallAlpha * alphaMult, useTextShadow, qcScale, buttons[i].label.c_str());
                         curX += labelSzs[i].x + btnGap;
                     }
@@ -2058,9 +2068,10 @@ namespace MenuFrameworkUI
             }
 
             float curY = y + pad;
+            const std::uint32_t listHeaderRgb = useCrimeColor ? a_cfg.crimeTextColor : a_cfg.infoCardTitleColor;
             DrawTextShadowed(
                 a_dl, a_baseFont, headerFontSize, { x + pad, curY },
-                MakeRgbCol(a_cfg.infoCardTitleColor, overallAlpha),
+                MakeRgbCol(listHeaderRgb, overallAlpha),
                 overallAlpha, useCaseBShadow, qcScale, displayHeader.c_str());
 
             if (!rangeStr.empty()) {
@@ -2201,7 +2212,7 @@ namespace MenuFrameworkUI
                     curX += keySpans[i] + itemGap * 0.85f;
                     DrawTextShadowed(
                         a_dl, a_baseFont, btnLabelFontSize, { curX, btnCenterY - btnLblSzs[i].y * 0.5f },
-                        MakeRgbCol(a_cfg.modernTextColor, overallAlpha * alphaMult),
+                        MakeRgbCol(qcBtnTextRgb, overallAlpha * alphaMult),
                         overallAlpha * alphaMult, useCaseBShadow, qcScale, buttons[i].label.c_str());
                     curX += btnLblSzs[i].x + btnGap;
                 }
@@ -2614,7 +2625,12 @@ namespace MenuFrameworkUI
                 changed |= ImGuiMCP::SliderFloat("Max Distance (units)", &data.companionMaxDistance, 50.0f, 500.0f, "%.0f");
                 changed |= ImGuiMCP::SliderFloat("Combat Max Distance (0 = Hide)", &data.companionCombatMaxDistance, 0.0f, 500.0f, "%.0f");
                 changed |= ImGuiMCP::Checkbox("Prevent Companion Stealing Loot Focus", &data.companionDeprioritizeLoot);
+                changed |= ImGuiMCP::Checkbox("Block Hidden Companion Interactions (E / R)", &data.blockHiddenCompanionInteractions);
             }
+
+            ImGuiMCP::Separator();
+            ImGuiMCP::Text("Interaction & Grab");
+            changed |= ImGuiMCP::SliderFloat("Hold Time to Grab Objects / Corpses (sec)", &data.grabHoldDelay, 0.30f, 2.00f, "%.2f");
 
             if (changed) {
                 cfg.ApplySnapshot(data, true);
@@ -2721,6 +2737,10 @@ namespace MenuFrameworkUI
             changed |= DrawColorPickerRGB("Accent / Selection Color", data.modernAccentColor);
             changed |= DrawColorPickerRGB("Background Color", data.modernBgColor);
             changed |= DrawColorPickerRGB("Border Color", data.modernBorderColor);
+            changed |= ImGuiMCP::Checkbox("Highlight Crime / Steal Prompts", &data.highlightCrimePrompts);
+            if (data.highlightCrimePrompts) {
+                changed |= DrawColorPickerRGB("Crime / Steal Text Color", data.crimeTextColor);
+            }
 
             if (changed) {
                 cfg.ApplySnapshot(data, true);
@@ -2830,6 +2850,151 @@ namespace MenuFrameworkUI
             changed |= ImGuiMCP::SliderFloat("QuickLoot Inner Key Size", &data.qcKeyTextScale, 0.40f, 1.20f, "%.2f");
             changed |= ImGuiMCP::SliderFloat("QuickLoot Action Label Size", &data.qcButtonTextScale, 0.5f, 2.5f, "%.2f");
 
+            ImGuiMCP::Separator();
+            ImGuiMCP::Text("QuickLoot Sorting & Priority");
+            static constexpr const char* kQcSortModes[] = {
+                "Category Priority (Custom)",
+                "Value (High -> Low)",
+                "Value / Weight (High -> Low)",
+                "Alphabetical (A -> Z)",
+                "Weight (Low -> High)",
+                "Weight (High -> Low)",
+                "Vanilla (Passive Mirror)"
+            };
+            changed |= ImGuiMCP::Combo("Sort Mode##QuickLoot", &data.qcSortMode, kQcSortModes, 7, -1);
+            changed |= ImGuiMCP::SliderInt("Take Anti-Bounce (ms)##QuickLoot", &data.qcTakeDebounceMs, 0, 300, "%d ms", 0);
+
+            if (data.qcSortMode != 6) {
+                ImGuiMCP::Text("Applies to Loot, Turrets & Companions (PA keeps E=Enter). Stealing/Workbenches stay Vanilla.");
+
+                if (data.qcSortMode == 0) {
+                    static constexpr const char* kQcSecondarySorts[] = {
+                        "Value (High -> Low)",
+                        "Value / Weight (High -> Low)",
+                        "Alphabetical (A -> Z)",
+                        "Weight (Low -> High)"
+                    };
+                    changed |= ImGuiMCP::Combo("Within Category Sort##QuickLoot", &data.qcCategorySecondarySort, kQcSecondarySorts, 4, -1);
+                }
+
+                ImGuiMCP::Text("Top Pins (Order: Quest -> Legendary -> Tagged -> Caps):");
+                changed |= ImGuiMCP::Checkbox("Pin Quest Items##QuickLoot", &data.qcPinQuestItems);
+                ImGuiMCP::SameLine();
+                changed |= ImGuiMCP::Checkbox("Pin Legendary Items##QuickLoot", &data.qcPinLegendary);
+                changed |= ImGuiMCP::Checkbox("Pin Tagged for Search##QuickLoot", &data.qcPinTaggedForSearch);
+                ImGuiMCP::SameLine();
+                changed |= ImGuiMCP::Checkbox("Pin Caps##QuickLoot", &data.qcPinCaps);
+
+                if (data.qcSortMode == 0) {
+                    static const auto s_uiSupport = []() {
+                        struct Support
+                        {
+                            bool hasPushPopId{ false };
+                            bool hasSmallButton{ false };
+                            bool hasSelectable{ false };
+                            bool hasDragDrop{ false };
+                        } s;
+                        if (HMODULE mf = GetModuleHandleW(L"F4SEMenuFramework")) {
+                            s.hasPushPopId =
+                                GetProcAddress(mf, "igPushID_Int") != nullptr &&
+                                GetProcAddress(mf, "igPopID") != nullptr;
+                            s.hasSmallButton = GetProcAddress(mf, "igSmallButton") != nullptr;
+                            s.hasSelectable = GetProcAddress(mf, "igSelectable_Bool") != nullptr;
+                            s.hasDragDrop =
+                                s.hasSelectable &&
+                                GetProcAddress(mf, "igBeginDragDropSource") != nullptr &&
+                                GetProcAddress(mf, "igSetDragDropPayload") != nullptr &&
+                                GetProcAddress(mf, "igEndDragDropSource") != nullptr &&
+                                GetProcAddress(mf, "igBeginDragDropTarget") != nullptr &&
+                                GetProcAddress(mf, "igAcceptDragDropPayload") != nullptr &&
+                                GetProcAddress(mf, "igEndDragDropTarget") != nullptr;
+                        }
+                        return s;
+                    }();
+
+                    SanitizeQuickLootCategoryOrder(data.qcCategoryOrder);
+                    ImGuiMCP::Text("Category Priority Order (Drag & Drop or Up/Down):");
+
+                    for (int i = 0; i < static_cast<int>(kQuickLootCategoryCount); ++i) {
+                        const std::size_t idx = static_cast<std::size_t>(i);
+                        const int cat = data.qcCategoryOrder[idx];
+
+                        if (s_uiSupport.hasPushPopId) {
+                            ImGuiMCP::PushID(i);
+                        }
+
+                        char upLabel[24]{};
+                        char downLabel[24]{};
+                        std::snprintf(upLabel, sizeof(upLabel), "^##qcUp%d", i);
+                        std::snprintf(downLabel, sizeof(downLabel), "v##qcDn%d", i);
+
+                        auto pressReorderBtn = [&](const char* btnLabel) -> bool {
+                            return s_uiSupport.hasSmallButton
+                                ? ImGuiMCP::SmallButton(btnLabel)
+                                : ImGuiMCP::Button(btnLabel);
+                        };
+
+                        if (pressReorderBtn(upLabel) && i > 0) {
+                            std::swap(data.qcCategoryOrder[idx], data.qcCategoryOrder[idx - 1]);
+                            changed = true;
+                        }
+                        ImGuiMCP::SameLine();
+                        if (pressReorderBtn(downLabel) && i + 1 < static_cast<int>(kQuickLootCategoryCount)) {
+                            std::swap(data.qcCategoryOrder[idx], data.qcCategoryOrder[idx + 1]);
+                            changed = true;
+                        }
+                        ImGuiMCP::SameLine();
+
+                        char rowLabel[64]{};
+                        std::snprintf(rowLabel, sizeof(rowLabel), "%d. %s##qcCat%d", i + 1, GetQuickLootCategoryLabel(cat), i);
+                        if (s_uiSupport.hasSelectable) {
+                            (void)ImGuiMCP::Selectable(rowLabel, false, 0, ImGuiMCP::ImVec2(0.0f, 0.0f));
+                            if (s_uiSupport.hasDragDrop) {
+                                if (ImGuiMCP::BeginDragDropSource(0)) {
+                                    ImGuiMCP::SetDragDropPayload("FAP_QC_CAT", &i, sizeof(int), 0);
+                                    ImGuiMCP::Text("%s", GetQuickLootCategoryLabel(cat));
+                                    ImGuiMCP::EndDragDropSource();
+                                }
+                                if (ImGuiMCP::BeginDragDropTarget()) {
+                                    if (const auto* payload = ImGuiMCP::AcceptDragDropPayload("FAP_QC_CAT", 0);
+                                        payload && payload->Data && payload->DataSize == static_cast<int>(sizeof(int))) {
+                                        const int srcIdx = *static_cast<const int*>(payload->Data);
+                                        if (srcIdx >= 0 &&
+                                            srcIdx < static_cast<int>(kQuickLootCategoryCount) &&
+                                            srcIdx != i) {
+                                            if (srcIdx < i) {
+                                                std::rotate(
+                                                    data.qcCategoryOrder.begin() + srcIdx,
+                                                    data.qcCategoryOrder.begin() + srcIdx + 1,
+                                                    data.qcCategoryOrder.begin() + i + 1);
+                                            } else {
+                                                std::rotate(
+                                                    data.qcCategoryOrder.begin() + i,
+                                                    data.qcCategoryOrder.begin() + srcIdx,
+                                                    data.qcCategoryOrder.begin() + srcIdx + 1);
+                                            }
+                                            changed = true;
+                                        }
+                                    }
+                                    ImGuiMCP::EndDragDropTarget();
+                                }
+                            }
+                        } else {
+                            ImGuiMCP::Text("%d. %s", i + 1, GetQuickLootCategoryLabel(cat));
+                        }
+
+                        if (s_uiSupport.hasPushPopId) {
+                            ImGuiMCP::PopID();
+                        }
+                    }
+
+                    if (ImGuiMCP::Button("Reset Category Order##QuickLoot")) {
+                        data.qcCategoryOrder = DefaultQuickLootCategoryOrder();
+                        changed = true;
+                    }
+                }
+            }
+
             if (changed) {
                 cfg.ApplySnapshot(data, true);
             }
@@ -2884,6 +3049,14 @@ namespace MenuFrameworkUI
         return g_hudOverlayActive.load(std::memory_order_acquire);
     }
 
+    bool IsAnyBlockingWindowOpen() noexcept
+    {
+        if (!g_frameworkInstalled.load(std::memory_order_acquire)) {
+            return false;
+        }
+        return F4SEMenuFramework::IsAnyBlockingWindowOpened();
+    }
+
     void Register()
     {
         HMODULE fwMod = GetModuleHandleW(L"F4SEMenuFramework");
@@ -2891,6 +3064,7 @@ namespace MenuFrameworkUI
             logger::info("F4SE Menu Framework not detected; skipping ImGui registration");
             return;
         }
+        g_frameworkInstalled.store(true, std::memory_order_release);
 
         F4SEMenuFramework::SetSection("FAP - Floating Action Prompts");
         F4SEMenuFramework::AddSectionItem("General", RenderGeneral);

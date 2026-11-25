@@ -4,4 +4,5 @@ namespace MenuFrameworkUI
 {
     void Register();
     [[nodiscard]] bool IsHudOverlayActive() noexcept;
+    [[nodiscard]] bool IsAnyBlockingWindowOpen() noexcept;
 }

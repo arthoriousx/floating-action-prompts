@@ -106,11 +106,11 @@ int main()
         in.currentClipX = 100.0f;
         in.currentClipY = 200.0f;
         in.currentClipAlpha = 1.0f;
-        in.powerArmorBypass = true;
-
+        in.powerArmorBypass = false;
+        in.inPowerArmor = true;
         CHECK(state.Step(in).action == HUDController::HUDAction::kApplyFloat);
 
-        in.inPowerArmor = true;
+        in.powerArmorBypass = true;
         const auto restore = state.Step(in);
         CHECK(restore.action == HUDController::HUDAction::kRestoreBaseline);
         CHECK(restore.applyPosition);
@@ -1790,6 +1790,707 @@ int main()
             CHECK_NEAR(paRestore.alpha, 1.0f, 0.001f);
             CHECK(!paSt.IsHidingAlpha());
         }
+    }
+
+    // 19. Crime verb detection & post-loot anti-grab / empty-container Activate guards
+    {
+        // 19a. IsCrimeActionVerb
+        CHECK(HUDController::IsCrimeActionVerb("STEAL"));
+        CHECK(HUDController::IsCrimeActionVerb("Steal"));
+        CHECK(HUDController::IsCrimeActionVerb("  STEAL FROM  "));
+        CHECK(HUDController::IsCrimeActionVerb("PICKPOCKET"));
+        CHECK(HUDController::IsCrimeActionVerb("Pickpocket Raider"));
+        CHECK(HUDController::IsCrimeActionVerb("TRESPASS"));
+        CHECK(!HUDController::IsCrimeActionVerb("TAKE"));
+        CHECK(!HUDController::IsCrimeActionVerb("EAT"));
+        CHECK(!HUDController::IsCrimeActionVerb("TALK"));
+        CHECK(!HUDController::IsCrimeActionVerb("STEALTH"));
+        CHECK(!HUDController::IsCrimeActionVerb("STEEL"));
+        CHECK(!HUDController::IsCrimeActionVerb(""));
+
+        // 19b. ShouldBlockPostLootActivate
+        CHECK(!HUDController::ShouldBlockPostLootActivate(1000, 0, 0, true, true, false));
+        CHECK(!HUDController::ShouldBlockPostLootActivate(1000, 0, 0, false, true, false));
+
+        // Spam tap allowed after non-empty take, held frame blocked within 700ms
+        CHECK(!HUDController::ShouldBlockPostLootActivate(1300, 1000, 0, true, true, false));
+        CHECK(HUDController::ShouldBlockPostLootActivate(1300, 1000, 0, false, true, false));
+        CHECK(HUDController::ShouldBlockPostLootActivate(1700, 1000, 0, false, true, false));
+        CHECK(!HUDController::ShouldBlockPostLootActivate(1701, 1000, 0, false, true, false));
+
+        // Container just emptied -> block both tap and hold within 450ms
+        CHECK(HUDController::ShouldBlockPostLootActivate(1200, 1000, 1000, true, true, false));
+        CHECK(HUDController::ShouldBlockPostLootActivate(1450, 1000, 1000, true, true, false));
+        CHECK(!HUDController::ShouldBlockPostLootActivate(1451, 1000, 1000, true, true, false));
+
+        // Already grabbing -> never block (so player can still release/drop cleanly)
+        CHECK(!HUDController::ShouldBlockPostLootActivate(1100, 1000, 1000, false, true, true));
+
+        // Negative delta / out-of-order clock safety
+        CHECK(!HUDController::ShouldBlockPostLootActivate(900, 1000, 1000, false, true, false));
+    }
+
+    // 18. Custom QuickLoot configurable sort modes, Top Pins, category priority, NaN safety, and selection clamp
+    {
+        auto mkCustomItem = [](
+            std::string_view a_name,
+            QuickLootCategory a_cat,
+            std::uint32_t a_value,
+            float a_weight,
+            std::uint32_t a_formId = 0x1000u,
+            bool a_quest = false,
+            bool a_legendary = false,
+            bool a_tagged = false,
+            bool a_caps = false)
+        {
+            HUDController::QuickContainerItemEntry e;
+            e.name = std::string(a_name);
+            e.baseFormID = a_formId;
+            e.quickLootCategory = a_cat;
+            e.value = a_value;
+            e.weight = a_weight;
+            e.isQuestItem = a_quest;
+            e.isLegendary = a_legendary;
+            e.isTaggedForSearch = a_tagged;
+            e.isCaps = a_caps;
+            return e;
+        };
+
+        // 18a. Top Pin precedence: Quest > Legendary > Tagged for Search > Caps > Normal (and individual toggles)
+        {
+            std::vector<HUDController::QuickContainerItemEntry> base{
+                mkCustomItem("Bottlecap", QuickLootCategory::Misc, 1, 0.0f, 0x0000000Fu, false, false, false, true),
+                mkCustomItem("Desk Fan", QuickLootCategory::Junk, 22, 3.0f, 0x2001u, false, false, true, false),
+                mkCustomItem("* Furious Pipe Pistol", QuickLootCategory::Pistol, 150, 3.0f, 0x2002u, false, true, false, false),
+                mkCustomItem("Holotape Evidence", QuickLootCategory::Holotape, 0, 0.0f, 0x2003u, true, false, false, false),
+                mkCustomItem("Vault 111 Key", QuickLootCategory::Key, 0, 0.0f, 0x2004u, false, false, false, false)
+            };
+
+            auto allPins = base;
+            HUDController::QuickLootSortConfig cfg;
+            cfg.sortMode = 0;
+            cfg.pinQuestItems = true;
+            cfg.pinLegendary = true;
+            cfg.pinTaggedForSearch = true;
+            cfg.pinCaps = true;
+            HUDController::SortQuickContainerItems(allPins, cfg);
+            CHECK(allPins[0].name == "Holotape Evidence");
+            CHECK(allPins[1].name == "* Furious Pipe Pistol");
+            CHECK(allPins[2].name == "Desk Fan");
+            CHECK(allPins[3].name == "Bottlecap");
+            CHECK(allPins[4].name == "Vault 111 Key");
+
+            // Disable Caps & Quest pins -> Legendary & Tagged stay pinned, Vault Key & Holotape follow category order (Key before Holotape before Misc)
+            auto partialPins = base;
+            cfg.pinQuestItems = false;
+            cfg.pinCaps = false;
+            HUDController::SortQuickContainerItems(partialPins, cfg);
+            CHECK(partialPins[0].name == "* Furious Pipe Pistol");
+            CHECK(partialPins[1].name == "Desk Fan");
+            CHECK(partialPins[2].name == "Vault 111 Key");
+            CHECK(partialPins[3].name == "Holotape Evidence");
+            CHECK(partialPins[4].name == "Bottlecap");
+        }
+
+        // 18b. Custom draggable category priority order + secondary sort options (Value Desc, Val/Wt Desc, Alpha A-Z, Weight Asc)
+        {
+            std::vector<HUDController::QuickContainerItemEntry> sample{
+                mkCustomItem("Laser Pistol", QuickLootCategory::Pistol, 80, 4.0f, 0x3001u),
+                mkCustomItem("Combat Rifle", QuickLootCategory::Rifle, 200, 12.0f, 0x3002u),
+                mkCustomItem("Wrench", QuickLootCategory::Junk, 10, 2.0f, 0x3003u),
+                mkCustomItem("Aluminum Can", QuickLootCategory::Junk, 15, 0.1f, 0x3004u),
+                mkCustomItem("Dungeon Key", QuickLootCategory::Key, 0, 0.0f, 0x3005u),
+                mkCustomItem("Reflex Sight Mod", QuickLootCategory::Mod, 90, 0.5f, 0x3006u),
+                mkCustomItem("Submachine Pistol", QuickLootCategory::Pistol, 120, 3.0f, 0x3007u)
+            };
+
+            // Put Junk first, then Mod, then Pistol, then Rifle, then Key; Secondary = Value/Weight DESC
+            auto items = sample;
+            HUDController::QuickLootSortConfig cfg;
+            cfg.sortMode = 0;
+            cfg.categorySecondarySort = 1; // Value/Weight DESC
+            cfg.categoryOrder = {
+                static_cast<int>(QuickLootCategory::Junk),
+                static_cast<int>(QuickLootCategory::Mod),
+                static_cast<int>(QuickLootCategory::Pistol),
+                static_cast<int>(QuickLootCategory::Rifle),
+                static_cast<int>(QuickLootCategory::Key),
+                static_cast<int>(QuickLootCategory::Medicine),
+                static_cast<int>(QuickLootCategory::Chem),
+                static_cast<int>(QuickLootCategory::Drink),
+                static_cast<int>(QuickLootCategory::Food),
+                static_cast<int>(QuickLootCategory::Ammo),
+                static_cast<int>(QuickLootCategory::Explosive),
+                static_cast<int>(QuickLootCategory::HeavyWeapon),
+                static_cast<int>(QuickLootCategory::Melee),
+                static_cast<int>(QuickLootCategory::PowerArmor),
+                static_cast<int>(QuickLootCategory::Armor),
+                static_cast<int>(QuickLootCategory::Clothing),
+                static_cast<int>(QuickLootCategory::BookNote),
+                static_cast<int>(QuickLootCategory::Holotape),
+                static_cast<int>(QuickLootCategory::Misc)
+            };
+            HUDController::SortQuickContainerItems(items, cfg);
+            CHECK(items[0].name == "Aluminum Can");      // Junk, 15/0.1 = 150
+            CHECK(items[1].name == "Wrench");            // Junk, 10/2 = 5
+            CHECK(items[2].name == "Reflex Sight Mod");
+            CHECK(items[3].name == "Submachine Pistol"); // Pistol, 120/3 = 40
+            CHECK(items[4].name == "Laser Pistol");      // Pistol, 80/4 = 20
+            CHECK(items[5].name == "Combat Rifle");      // Rifle (sub-ordered after Pistol)
+            CHECK(items[6].name == "Dungeon Key");
+
+            // Secondary = Alphabetical A-Z within categories
+            items = sample;
+            cfg.categorySecondarySort = 2;
+            HUDController::SortQuickContainerItems(items, cfg);
+            CHECK(items[0].name == "Aluminum Can");
+            CHECK(items[1].name == "Wrench");
+            CHECK(items[3].name == "Laser Pistol");
+            CHECK(items[4].name == "Submachine Pistol");
+
+            // Secondary = Weight ASC within categories
+            items = sample;
+            cfg.categorySecondarySort = 3;
+            HUDController::SortQuickContainerItems(items, cfg);
+            CHECK(items[3].name == "Submachine Pistol"); // 3.0 < 4.0
+            CHECK(items[4].name == "Laser Pistol");
+        }
+
+        // 18c. Global Sort Modes 1..5, NaN weight sanitization, and Mode 6 (Vanilla no-op)
+        {
+            const float qNan = std::numeric_limits<float>::quiet_NaN();
+            std::vector<HUDController::QuickContainerItemEntry> base{
+                mkCustomItem("[Tag] Heavy Brick", QuickLootCategory::Junk, 40, 20.0f, 0x4001u),
+                mkCustomItem("Weightless Gem", QuickLootCategory::Misc, 100, 0.0f, 0x4002u),
+                mkCustomItem("Alpha Pill", QuickLootCategory::Medicine, 50, 0.2f, 0x4003u),
+                mkCustomItem("Zero Val Note", QuickLootCategory::BookNote, 0, qNan, 0x4004u)
+            };
+
+            // Mode 1: Value DESC
+            auto m1 = base;
+            HUDController::QuickLootSortConfig cfg;
+            cfg.sortMode = 1;
+            HUDController::SortQuickContainerItems(m1, cfg);
+            CHECK(m1[0].name == "Weightless Gem");
+            CHECK(m1[1].name == "Alpha Pill");
+            CHECK(m1[2].name == "[Tag] Heavy Brick");
+            CHECK(m1[3].name == "Zero Val Note");
+
+            // Mode 2: Value/Weight DESC (Weightless valuable > finite > 0 value NaN weight)
+            auto m2 = base;
+            cfg.sortMode = 2;
+            HUDController::SortQuickContainerItems(m2, cfg);
+            CHECK(m2[0].name == "Weightless Gem");
+            CHECK(m2[1].name == "Alpha Pill");        // 250.0
+            CHECK(m2[2].name == "[Tag] Heavy Brick"); // 2.0
+            CHECK(m2[3].name == "Zero Val Note");
+
+            // Mode 3: Alphabetical A-Z (clean display name strips [Tag] -> "Alpha Pill" < "Heavy Brick" < "Weightless Gem" < "Zero Val Note")
+            auto m3 = base;
+            cfg.sortMode = 3;
+            HUDController::SortQuickContainerItems(m3, cfg);
+            CHECK(m3[0].name == "Alpha Pill");
+            CHECK(m3[1].name == "[Tag] Heavy Brick");
+            CHECK(m3[2].name == "Weightless Gem");
+            CHECK(m3[3].name == "Zero Val Note");
+
+            // Mode 4: Weight ASC
+            auto m4 = base;
+            cfg.sortMode = 4;
+            HUDController::SortQuickContainerItems(m4, cfg);
+            CHECK(m4[0].weight <= 0.0f);
+            CHECK(m4[3].name == "[Tag] Heavy Brick");
+
+            // Mode 5: Weight DESC
+            auto m5 = base;
+            cfg.sortMode = 5;
+            HUDController::SortQuickContainerItems(m5, cfg);
+            CHECK(m5[0].name == "[Tag] Heavy Brick");
+            CHECK(m5[1].name == "Alpha Pill");
+
+            // Mode 6: Vanilla Passive Mirror preserves input sequence untouched
+            auto m6 = base;
+            cfg.sortMode = 6;
+            HUDController::SortQuickContainerItems(m6, cfg);
+            CHECK(m6[0].name == "[Tag] Heavy Brick");
+            CHECK(m6[3].name == "Zero Val Note");
+        }
+
+        // 18d. StepCustomQuickLootSelection clamping (no wrap-around) & AggregateItemStacks separation
+        {
+            CHECK(HUDController::StepCustomQuickLootSelection(0, -1, 5) == 0);
+            CHECK(HUDController::StepCustomQuickLootSelection(4, 1, 5) == 4);
+            CHECK(HUDController::StepCustomQuickLootSelection(2, 1, 5) == 3);
+            CHECK(HUDController::StepCustomQuickLootSelection(2, -1, 5) == 1);
+            CHECK(HUDController::StepCustomQuickLootSelection(9, 0, 4) == 3);
+            CHECK(HUDController::StepCustomQuickLootSelection(2, 1, 0) == 0);
+
+            auto a = mkCustomItem("Knife", QuickLootCategory::Melee, 20, 1.0f, 0x5001u);
+            auto b = mkCustomItem("Knife", QuickLootCategory::Melee, 20, 1.0f, 0x5001u);
+            b.isTemporary = true;
+            auto c = mkCustomItem("Knife", QuickLootCategory::Melee, 20, 1.0f, 0x5002u);
+            std::vector<HUDController::QuickContainerItemEntry> stacks{ a, b, c };
+            HUDController::AggregateItemStacks(stacks);
+            CHECK(stacks.size() == 3);
+        }
+    }
+
+    // 20. Custom QuickLoot single-item-per-physical-press latch & 80ms debounce
+    {
+        auto mkTakeIn = [](
+            std::uint32_t dev,
+            std::uint32_t id,
+            bool isFamily,
+            bool isJust,
+            bool isPressed,
+            bool isRel,
+            bool canTake,
+            bool suppressPress = false)
+        {
+            HUDController::QuickLootTakeInput in{};
+            in.device = dev;
+            in.idCode = id;
+            in.isTakeFamily = isFamily;
+            in.isJustPressed = isJust;
+            in.isPressed = isPressed;
+            in.isReleased = isRel;
+            in.canTake = canTake;
+            in.suppressTakeFamilyPress = suppressPress;
+            return in;
+        };
+
+        HUDController::QuickLootTakeLatchState st{};
+        HUDController::QuickLootTakePassState pass{};
+
+        // First clean press takes 1 item and latches
+        auto d = HUDController::StepQuickLootTakeLatch(st, pass, mkTakeIn(0, 18, true, true, true, false, true, true), 1000);
+        CHECK(d.acceptTake == true);
+        CHECK(d.swallowEvent == true);
+        CHECK(st.latched == true);
+
+        // Simulated engine RemoveItem reset emitting QJustPressed again 16ms later while still down
+        pass = {};
+        d = HUDController::StepQuickLootTakeLatch(st, pass, mkTakeIn(0, 18, true, true, true, false, true, true), 1016);
+        CHECK(d.acceptTake == false);
+        CHECK(d.swallowEvent == true);
+        CHECK(st.latched == true);
+
+        // Continuous physical hold past 1500ms keeps latch alive via heartbeat (never double-takes)
+        for (std::int64_t t = 1500; t <= 3500; t += 500) {
+            pass = {};
+            d = HUDController::StepQuickLootTakeLatch(st, pass, mkTakeIn(0, 18, true, false, true, false, true, true), t);
+            CHECK(d.acceptTake == false);
+            CHECK(d.swallowEvent == true);
+            CHECK(st.latched == true);
+        }
+        pass = {};
+        d = HUDController::StepQuickLootTakeLatch(st, pass, mkTakeIn(0, 18, true, true, true, false, true, true), 3516);
+        CHECK(d.acceptTake == false);
+        CHECK(d.swallowEvent == true);
+        CHECK(st.latched == true);
+
+        // Unrelated key release must NOT unlatch bound key (0, 18)
+        pass = {};
+        d = HUDController::StepQuickLootTakeLatch(st, pass, mkTakeIn(0, 32, false, false, false, true, false, false), 3530);
+        CHECK(d.swallowEvent == false);
+        CHECK(st.latched == true);
+
+        // Multi-event release in same pass: both QCTakeItem release and Activate release are swallowed
+        pass = {};
+        d = HUDController::StepQuickLootTakeLatch(st, pass, mkTakeIn(0, 18, true, false, false, true, false, false), 3550);
+        CHECK(d.acceptTake == false);
+        CHECK(d.swallowEvent == true);
+        CHECK(st.latched == false);
+        d = HUDController::StepQuickLootTakeLatch(st, pass, mkTakeIn(0, 18, true, false, false, true, false, false), 3550);
+        CHECK(d.acceptTake == false);
+        CHECK(d.swallowEvent == true);
+
+        // Press order: Activate arriving BEFORE QCTakeItem in same pass is swallowed without blocking QCTakeItem
+        pass = {};
+        d = HUDController::StepQuickLootTakeLatch(st, pass, mkTakeIn(0, 18, true, true, true, false, false, true), 3700);
+        CHECK(d.acceptTake == false);
+        CHECK(d.swallowEvent == true);
+        CHECK(st.latched == false);
+        d = HUDController::StepQuickLootTakeLatch(st, pass, mkTakeIn(0, 18, true, true, true, false, true, true), 3700);
+        CHECK(d.acceptTake == true);
+        CHECK(d.swallowEvent == true);
+        CHECK(st.latched == true);
+        pass = {};
+        (void)HUDController::StepQuickLootTakeLatch(st, pass, mkTakeIn(0, 18, true, false, false, true, false, false), 3740);
+
+        // Debounce test: bounce press 40ms after a fresh take is suppressed & re-latched
+        HUDController::QuickLootTakeLatchState bounceSt{};
+        pass = {};
+        d = HUDController::StepQuickLootTakeLatch(bounceSt, pass, mkTakeIn(0, 18, true, true, true, false, true, true), 5000);
+        CHECK(d.acceptTake == true);
+        pass = {};
+        (void)HUDController::StepQuickLootTakeLatch(bounceSt, pass, mkTakeIn(0, 18, true, false, false, true, false, false), 5020);
+        CHECK(bounceSt.latched == false);
+        pass = {};
+        d = HUDController::StepQuickLootTakeLatch(bounceSt, pass, mkTakeIn(0, 18, true, true, true, false, true, true), 5040);
+        CHECK(d.acceptTake == false);
+        CHECK(d.swallowEvent == true);
+        CHECK(bounceSt.latched == true);
+
+        // After clean release and >= 100ms quiet time since release (and press), next press succeeds
+        pass = {};
+        (void)HUDController::StepQuickLootTakeLatch(bounceSt, pass, mkTakeIn(0, 18, true, false, false, true, false, false), 5070);
+        CHECK(bounceSt.latched == false);
+        pass = {};
+        d = HUDController::StepQuickLootTakeLatch(bounceSt, pass, mkTakeIn(0, 18, true, true, true, false, true, true), 5170);
+        CHECK(d.acceptTake == true);
+        CHECK(d.swallowEvent == true);
+        CHECK(bounceSt.latched == true);
+
+        // Mechanical switch release-chatter after a normal 150ms hold (> 100ms since press):
+        // pressing at 1000ms, releasing at 1150ms, chatter at 1155ms/1165ms are ALL rejected;
+        // clean press 100ms after final settle (1270ms) succeeds!
+        HUDController::QuickLootTakeLatchState mechSt{};
+        pass = {};
+        d = HUDController::StepQuickLootTakeLatch(mechSt, pass, mkTakeIn(0, 18, true, true, true, false, true, true), 1000);
+        CHECK(d.acceptTake == true);
+        pass = {};
+        d = HUDController::StepQuickLootTakeLatch(mechSt, pass, mkTakeIn(0, 18, true, false, false, true, false, false), 1150);
+        CHECK(d.acceptTake == false);
+        CHECK(d.swallowEvent == true);
+        CHECK(mechSt.latched == false);
+        CHECK(mechSt.lastReleaseMs == 1150);
+
+        pass = {};
+        d = HUDController::StepQuickLootTakeLatch(mechSt, pass, mkTakeIn(0, 18, true, true, true, false, true, true), 1155);
+        CHECK(d.acceptTake == false);
+        CHECK(d.swallowEvent == true);
+        CHECK(mechSt.latched == true);
+
+        pass = {};
+        d = HUDController::StepQuickLootTakeLatch(mechSt, pass, mkTakeIn(0, 18, true, false, false, true, false, false), 1159);
+        CHECK(mechSt.latched == false);
+        CHECK(mechSt.lastReleaseMs == 1159);
+
+        pass = {};
+        d = HUDController::StepQuickLootTakeLatch(mechSt, pass, mkTakeIn(0, 18, true, true, true, false, true, true), 1165);
+        CHECK(d.acceptTake == false);
+        CHECK(d.swallowEvent == true);
+        CHECK(mechSt.latched == true);
+
+        pass = {};
+        d = HUDController::StepQuickLootTakeLatch(mechSt, pass, mkTakeIn(0, 18, true, false, false, true, false, false), 1170);
+        CHECK(mechSt.latched == false);
+        CHECK(mechSt.lastReleaseMs == 1170);
+
+        pass = {};
+        d = HUDController::StepQuickLootTakeLatch(mechSt, pass, mkTakeIn(0, 18, true, true, true, false, true, true), 1270);
+        CHECK(d.acceptTake == true);
+        CHECK(d.swallowEvent == true);
+        CHECK(mechSt.latched == true);
+
+        // Zero debounce (0 ms) disables both press and post-release cooldowns
+        HUDController::QuickLootTakeLatchState zeroDb{};
+        pass = {};
+        d = HUDController::StepQuickLootTakeLatch(zeroDb, pass, mkTakeIn(0, 18, true, true, true, false, true, true), 2000, 0);
+        CHECK(d.acceptTake == true);
+        pass = {};
+        (void)HUDController::StepQuickLootTakeLatch(zeroDb, pass, mkTakeIn(0, 18, true, false, false, true, false, false), 2010, 0);
+        pass = {};
+        d = HUDController::StepQuickLootTakeLatch(zeroDb, pass, mkTakeIn(0, 18, true, true, true, false, true, true), 2015, 0);
+        CHECK(d.acceptTake == true);
+
+        // Stale latch recovery when key-up was lost (no held frames for >= 1500ms)
+        pass = {};
+        d = HUDController::StepQuickLootTakeLatch(bounceSt, pass, mkTakeIn(0, 18, true, true, true, false, true, true), 7000);
+        CHECK(d.acceptTake == true);
+        CHECK(d.swallowEvent == true);
+
+        // Activate while not latched and not suppressed does not take or swallow
+        HUDController::QuickLootTakeLatchState unlatched{};
+        pass = {};
+        d = HUDController::StepQuickLootTakeLatch(unlatched, pass, mkTakeIn(0, 18, true, true, true, false, false, false), 8000);
+        CHECK(d.acceptTake == false);
+        CHECK(d.swallowEvent == false);
+    }
+
+    // 21. Suppressed companion & orphan SecondaryActivate -> ReadyWeapon (Draw/Reload/Sheath)
+    {
+        // SecondaryActivate tap when companion is suppressed and weapon drawn -> Reload on release
+        HUDController::SuppressedReadyState st{};
+        HUDController::SuppressedReadyInput in{};
+        in.isSecondaryActivate = true;
+        in.isJustPressed = true;
+        in.isPressed = true;
+        in.blockCompanionReady = true;
+        in.canCustomReadyAction = true;
+        in.weaponDrawn = true;
+
+        auto dec = HUDController::StepSuppressedSecondaryReady(st, in, 1000);
+        CHECK(dec.swallowEvent == true);
+        CHECK(dec.consumedPass == true);
+        CHECK(dec.action == HUDController::SuppressedReadyAction::kNone);
+        CHECK(st.held == true);
+
+        // Release arrives on ReadyWeapon because crosshair moved away -> still finishes Reload when drawn
+        HUDController::SuppressedReadyInput relIn{};
+        relIn.isReadyWeapon = true;
+        relIn.isReleased = true;
+        relIn.canCustomReadyAction = true;
+        relIn.weaponDrawn = true;
+        dec = HUDController::StepSuppressedSecondaryReady(st, relIn, 1080);
+        CHECK(dec.swallowEvent == true);
+        CHECK(dec.consumedPass == true);
+        CHECK(dec.action == HUDController::SuppressedReadyAction::kReload);
+        CHECK(st.held == false);
+
+        // Holstered (weaponDrawn == false) short tap R -> swallowed, does NOT draw on tap
+        st = {};
+        HUDController::SuppressedReadyInput holsteredPress{};
+        holsteredPress.isSecondaryActivate = true;
+        holsteredPress.isJustPressed = true;
+        holsteredPress.isPressed = true;
+        holsteredPress.blockCompanionReady = true;
+        holsteredPress.canCustomReadyAction = true;
+        holsteredPress.weaponDrawn = false;
+        dec = HUDController::StepSuppressedSecondaryReady(st, holsteredPress, 1500);
+        CHECK(dec.swallowEvent == true);
+        CHECK(dec.consumedPass == true);
+        CHECK(dec.action == HUDController::SuppressedReadyAction::kNone);
+        CHECK(st.held == true);
+
+        HUDController::SuppressedReadyInput holsteredTapRel{};
+        holsteredTapRel.isSecondaryActivate = true;
+        holsteredTapRel.isReleased = true;
+        holsteredTapRel.blockCompanionReady = true;
+        holsteredTapRel.canCustomReadyAction = true;
+        holsteredTapRel.weaponDrawn = false;
+        dec = HUDController::StepSuppressedSecondaryReady(st, holsteredTapRel, 1600);
+        CHECK(dec.swallowEvent == true);
+        CHECK(dec.consumedPass == true);
+        CHECK(dec.action == HUDController::SuppressedReadyAction::kNone);
+        CHECK(st.held == false);
+
+        // Holstered (weaponDrawn == false) hold R (>= 0.35s) -> draws weapon on hold; further hold/release emit kNone
+        st = {};
+        dec = HUDController::StepSuppressedSecondaryReady(st, holsteredPress, 1700);
+        CHECK(dec.swallowEvent == true);
+        HUDController::SuppressedReadyInput holsteredHold = holsteredPress;
+        holsteredHold.isJustPressed = false;
+        holsteredHold.heldDownSecs = 0.40f;
+        dec = HUDController::StepSuppressedSecondaryReady(st, holsteredHold, 2100);
+        CHECK(dec.swallowEvent == true);
+        CHECK(dec.consumedPass == true);
+        CHECK(dec.action == HUDController::SuppressedReadyAction::kDraw);
+        CHECK(st.holstered == true);
+
+        holsteredHold.heldDownSecs = 0.50f;
+        holsteredHold.weaponDrawn = true;
+        dec = HUDController::StepSuppressedSecondaryReady(st, holsteredHold, 2200);
+        CHECK(dec.swallowEvent == true);
+        CHECK(dec.action == HUDController::SuppressedReadyAction::kNone);
+        CHECK(st.holstered == true);
+
+        holsteredTapRel.weaponDrawn = true;
+        dec = HUDController::StepSuppressedSecondaryReady(st, holsteredTapRel, 2300);
+        CHECK(dec.swallowEvent == true);
+        CHECK(dec.action == HUDController::SuppressedReadyAction::kNone);
+        CHECK(st.held == false);
+        CHECK(st.holstered == false);
+
+        // Holstered hold R (>= 0.35s) with canCustomReadyAction == false -> sets holstered flag, returns kNone
+        st = {};
+        HUDController::SuppressedReadyInput holsteredNoActPress = holsteredPress;
+        holsteredNoActPress.blockOrphanSecondary = true;
+        holsteredNoActPress.blockCompanionReady = false;
+        holsteredNoActPress.canCustomReadyAction = false;
+        dec = HUDController::StepSuppressedSecondaryReady(st, holsteredNoActPress, 2400);
+        CHECK(dec.swallowEvent == true);
+        CHECK(st.held == false);
+
+        // Simulated state where st.held was set before canCustomReadyAction became false
+        st = {};
+        dec = HUDController::StepSuppressedSecondaryReady(st, holsteredPress, 2450);
+        CHECK(st.held == true);
+        HUDController::SuppressedReadyInput holsteredHoldNoAct = holsteredPress;
+        holsteredHoldNoAct.isJustPressed = false;
+        holsteredHoldNoAct.heldDownSecs = 0.40f;
+        holsteredHoldNoAct.canCustomReadyAction = false;
+        dec = HUDController::StepSuppressedSecondaryReady(st, holsteredHoldNoAct, 2850);
+        CHECK(dec.swallowEvent == true);
+        CHECK(dec.action == HUDController::SuppressedReadyAction::kNone);
+        CHECK(st.holstered == true);
+        holsteredTapRel.canCustomReadyAction = false;
+        dec = HUDController::StepSuppressedSecondaryReady(st, holsteredTapRel, 2900);
+        CHECK(dec.swallowEvent == true);
+        CHECK(dec.action == HUDController::SuppressedReadyAction::kNone);
+        CHECK(st.held == false);
+
+        // Hold >= 0.35s with weapon drawn triggers Sheath, then release emits kNone
+        st = {};
+        dec = HUDController::StepSuppressedSecondaryReady(st, in, 2000);
+        CHECK(dec.swallowEvent == true);
+        HUDController::SuppressedReadyInput holdIn = in;
+        holdIn.isJustPressed = false;
+        holdIn.heldDownSecs = 0.40f;
+        dec = HUDController::StepSuppressedSecondaryReady(st, holdIn, 2400);
+        CHECK(dec.swallowEvent == true);
+        CHECK(dec.action == HUDController::SuppressedReadyAction::kSheath);
+        CHECK(st.holstered == true);
+        HUDController::SuppressedReadyInput relDrawn{};
+        relDrawn.isSecondaryActivate = true;
+        relDrawn.isReleased = true;
+        relDrawn.canCustomReadyAction = true;
+        relDrawn.weaponDrawn = false;
+        dec = HUDController::StepSuppressedSecondaryReady(st, relDrawn, 2500);
+        CHECK(dec.swallowEvent == true);
+        CHECK(dec.action == HUDController::SuppressedReadyAction::kNone);
+        CHECK(st.held == false);
+
+        // Orphan SecondaryActivate when no prompt is visible -> blocked & converted to Reload
+        st = {};
+        HUDController::SuppressedReadyInput orphanPress{};
+        orphanPress.isSecondaryActivate = true;
+        orphanPress.isJustPressed = true;
+        orphanPress.isPressed = true;
+        orphanPress.blockOrphanSecondary = true;
+        orphanPress.passHasBlockedSecondary = true;
+        orphanPress.canCustomReadyAction = true;
+        orphanPress.weaponDrawn = true;
+        dec = HUDController::StepSuppressedSecondaryReady(st, orphanPress, 3000);
+        CHECK(dec.swallowEvent == true);
+        CHECK(st.held == true);
+
+        HUDController::SuppressedReadyInput orphanRel{};
+        orphanRel.isSecondaryActivate = true;
+        orphanRel.isReleased = true;
+        orphanRel.blockOrphanSecondary = true;
+        orphanRel.canCustomReadyAction = true;
+        orphanRel.weaponDrawn = true;
+        dec = HUDController::StepSuppressedSecondaryReady(st, orphanRel, 3060);
+        CHECK(dec.swallowEvent == true);
+        CHECK(dec.action == HUDController::SuppressedReadyAction::kReload);
+        CHECK(st.held == false);
+
+        // Same-pass ReadyWeapon before orphan SecondaryActivate does not double-fire on press or release
+        st = {};
+        HUDController::SuppressedReadyInput readyFirst{};
+        readyFirst.isReadyWeapon = true;
+        readyFirst.isJustPressed = true;
+        readyFirst.isPressed = true;
+        readyFirst.blockOrphanSecondary = true;
+        readyFirst.passHasBlockedSecondary = true;
+        readyFirst.canCustomReadyAction = true;
+        readyFirst.weaponDrawn = true;
+        dec = HUDController::StepSuppressedSecondaryReady(st, readyFirst, 3500);
+        CHECK(dec.swallowEvent == true);
+        CHECK(dec.consumedPass == true);
+        CHECK(st.held == true);
+        orphanPress.alreadyHandledThisPass = true;
+        dec = HUDController::StepSuppressedSecondaryReady(st, orphanPress, 3500);
+        CHECK(dec.swallowEvent == true);
+        CHECK(dec.consumedPass == false);
+        // Same-pass release: SecondaryActivate release fires Reload once, follow-up ReadyWeapon release is swallowed
+        orphanRel.alreadyHandledThisPass = false;
+        dec = HUDController::StepSuppressedSecondaryReady(st, orphanRel, 3550);
+        CHECK(dec.swallowEvent == true);
+        CHECK(dec.consumedPass == true);
+        CHECK(dec.action == HUDController::SuppressedReadyAction::kReload);
+        CHECK(st.held == false);
+        HUDController::SuppressedReadyInput readyFollowupRel{};
+        readyFollowupRel.isReadyWeapon = true;
+        readyFollowupRel.isReleased = true;
+        readyFollowupRel.alreadyHandledThisPass = true;
+        dec = HUDController::StepSuppressedSecondaryReady(st, readyFollowupRel, 3550);
+        CHECK(dec.swallowEvent == true);
+        CHECK(dec.action == HUDController::SuppressedReadyAction::kNone);
+
+        // Even when canCustomReadyAction == false, blocked SecondaryActivate is STILL swallowed
+        st = {};
+        orphanPress.alreadyHandledThisPass = false;
+        orphanPress.canCustomReadyAction = false;
+        dec = HUDController::StepSuppressedSecondaryReady(st, orphanPress, 4000);
+        CHECK(dec.swallowEvent == true);
+        CHECK(dec.action == HUDController::SuppressedReadyAction::kNone);
+        CHECK(st.held == false);
+
+        // Normal SecondaryActivate when prompt IS visible is NOT blocked
+        HUDController::SuppressedReadyInput visiblePrompt{};
+        visiblePrompt.isSecondaryActivate = true;
+        visiblePrompt.isJustPressed = true;
+        visiblePrompt.isPressed = true;
+        visiblePrompt.canCustomReadyAction = true;
+        dec = HUDController::StepSuppressedSecondaryReady(st, visiblePrompt, 5000);
+        CHECK(dec.swallowEvent == false);
+        CHECK(dec.action == HUDController::SuppressedReadyAction::kNone);
+
+        // Normal ReadyWeapon in empty air (blockOrphanSecondary == true, blockCompanionReady == false) is untouched
+        HUDController::SuppressedReadyInput airReady{};
+        airReady.isReadyWeapon = true;
+        airReady.isJustPressed = true;
+        airReady.isPressed = true;
+        airReady.blockOrphanSecondary = true;
+        airReady.canCustomReadyAction = true;
+        dec = HUDController::StepSuppressedSecondaryReady(st, airReady, 6000);
+        CHECK(dec.swallowEvent == false);
+        CHECK(dec.action == HUDController::SuppressedReadyAction::kNone);
+
+        // QCOpenTransferMenu is blocked only when companion Ready is suppressed or held
+        st = {};
+        HUDController::SuppressedReadyInput qcTrans{};
+        qcTrans.isQcTransfer = true;
+        qcTrans.isJustPressed = true;
+        qcTrans.isPressed = true;
+        qcTrans.blockOrphanSecondary = true;
+        dec = HUDController::StepSuppressedSecondaryReady(st, qcTrans, 8000);
+        CHECK(dec.swallowEvent == false);
+        qcTrans.blockCompanionReady = true;
+        dec = HUDController::StepSuppressedSecondaryReady(st, qcTrans, 8001);
+        CHECK(dec.swallowEvent == true);
+    }
+
+    // 22. Granular QuickLoot subcategories & Power Armor workbench exclusion
+    {
+        // Weapon subcategories
+        CHECK(HUDController::ClassifyWeaponQuickLootCategory(10, false, false, false, false, false, false) == QuickLootCategory::Explosive);
+        CHECK(HUDController::ClassifyWeaponQuickLootCategory(11, false, false, false, false, false, false) == QuickLootCategory::Explosive);
+        CHECK(HUDController::ClassifyWeaponQuickLootCategory(9, true, false, false, false, false, false) == QuickLootCategory::Explosive);
+        // Fat Man / Missile Launcher have BOTH HeavyGun + Explosive -> HeavyWeapon
+        CHECK(HUDController::ClassifyWeaponQuickLootCategory(9, false, true, true, false, false, false) == QuickLootCategory::HeavyWeapon);
+        // Pure explosive gun without HeavyGun -> Explosive
+        CHECK(HUDController::ClassifyWeaponQuickLootCategory(9, false, false, true, false, false, false) == QuickLootCategory::Explosive);
+        // Melee WEAPON_TYPE (0..6) or melee keyword -> Melee
+        CHECK(HUDController::ClassifyWeaponQuickLootCategory(0, false, false, false, false, false, false) == QuickLootCategory::Melee);
+        CHECK(HUDController::ClassifyWeaponQuickLootCategory(5, false, false, false, false, false, false) == QuickLootCategory::Melee);
+        CHECK(HUDController::ClassifyWeaponQuickLootCategory(9, false, false, false, true, false, false) == QuickLootCategory::Melee);
+        // Pistol vs Rifle/Shotgun vs fallback
+        CHECK(HUDController::ClassifyWeaponQuickLootCategory(9, false, false, false, false, true, false) == QuickLootCategory::Pistol);
+        CHECK(HUDController::ClassifyWeaponQuickLootCategory(9, false, false, false, false, false, true) == QuickLootCategory::Rifle);
+        CHECK(HUDController::ClassifyWeaponQuickLootCategory(9, false, false, false, false, false, false) == QuickLootCategory::Rifle);
+
+        // Armor subcategories
+        CHECK(HUDController::ClassifyArmorQuickLootCategory(true, true, false, 120, true) == QuickLootCategory::PowerArmor);
+        CHECK(HUDController::ClassifyArmorQuickLootCategory(false, true, false, 15, false) == QuickLootCategory::Armor);
+        CHECK(HUDController::ClassifyArmorQuickLootCategory(false, false, false, 10, false) == QuickLootCategory::Armor);
+        CHECK(HUDController::ClassifyArmorQuickLootCategory(false, false, true, 5, false) == QuickLootCategory::Armor);
+        CHECK(HUDController::ClassifyArmorQuickLootCategory(false, false, false, 0, true) == QuickLootCategory::Armor);
+        CHECK(HUDController::ClassifyArmorQuickLootCategory(false, false, true, 0, false) == QuickLootCategory::Clothing);
+        CHECK(HUDController::ClassifyArmorQuickLootCategory(false, false, false, 0, false) == QuickLootCategory::Clothing);
+
+        // Aid subcategories
+        CHECK(HUDController::ClassifyAidQuickLootCategory(true, false, false, false, false, false, false) == QuickLootCategory::Medicine);
+        CHECK(HUDController::ClassifyAidQuickLootCategory(false, false, true, false, false, false, false) == QuickLootCategory::Medicine);
+        // Alcohol has addiction flag/item AND drink keyword -> must classify as Drink, not Chem
+        CHECK(HUDController::ClassifyAidQuickLootCategory(false, true, false, false, true, false, true) == QuickLootCategory::Drink);
+        CHECK(HUDController::ClassifyAidQuickLootCategory(false, true, false, false, true, false, false) == QuickLootCategory::Drink);
+        CHECK(HUDController::ClassifyAidQuickLootCategory(false, true, false, true, false, false, true) == QuickLootCategory::Chem);
+        CHECK(HUDController::ClassifyAidQuickLootCategory(false, false, false, false, false, false, true) == QuickLootCategory::Chem);
+        CHECK(HUDController::ClassifyAidQuickLootCategory(false, true, false, false, false, true, false) == QuickLootCategory::Food);
+        CHECK(HUDController::ClassifyAidQuickLootCategory(false, true, false, false, false, false, false) == QuickLootCategory::Food);
+        CHECK(HUDController::ClassifyAidQuickLootCategory(false, false, false, false, false, false, false) == QuickLootCategory::Medicine);
+
+        // Power Armor furniture exclusion vs Workbenches
+        CHECK(HUDController::IsQuickContainerWorkbenchTarget(TargetInfo::ItemKind::Furniture, true, true, false) == false);
+        CHECK(HUDController::IsQuickContainerWorkbenchTarget(TargetInfo::ItemKind::Container, true, true, false) == false);
+        CHECK(HUDController::IsQuickContainerWorkbenchTarget(TargetInfo::ItemKind::Furniture, true, false, true) == true);
+        CHECK(HUDController::IsQuickContainerWorkbenchTarget(TargetInfo::ItemKind::Furniture, true, false, false) == true);
+        CHECK(HUDController::IsQuickContainerWorkbenchTarget(TargetInfo::ItemKind::Furniture, false, false, false) == true);
+        CHECK(HUDController::IsQuickContainerWorkbenchTarget(TargetInfo::ItemKind::Container, true, false, false) == false);
     }
 
     std::cout << "[TEST] test_hud_controller PASSED" << std::endl;

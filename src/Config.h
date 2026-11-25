@@ -1,10 +1,12 @@
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <mutex>
 #include <string>
+#include <string_view>
 
 struct Vector3
 {
@@ -13,20 +15,54 @@ struct Vector3
     float z{ 0.0f };
 };
 
+inline constexpr std::size_t kQuickLootCategoryCount = 19;
+
+enum class QuickLootCategory : std::uint8_t
+{
+    Key = 0,
+    Medicine = 1,
+    Chem = 2,
+    Drink = 3,
+    Food = 4,
+    Ammo = 5,
+    Explosive = 6,
+    Pistol = 7,
+    Rifle = 8,
+    HeavyWeapon = 9,
+    Melee = 10,
+    PowerArmor = 11,
+    Armor = 12,
+    Clothing = 13,
+    Mod = 14,
+    BookNote = 15,
+    Holotape = 16,
+    Misc = 17,
+    Junk = 18
+};
+
+[[nodiscard]] const char* GetQuickLootCategoryKey(int a_catIndex) noexcept;
+[[nodiscard]] const char* GetQuickLootCategoryLabel(int a_catIndex) noexcept;
+[[nodiscard]] std::array<int, kQuickLootCategoryCount> DefaultQuickLootCategoryOrder() noexcept;
+void SanitizeQuickLootCategoryOrder(std::array<int, kQuickLootCategoryCount>& a_order) noexcept;
+[[nodiscard]] std::array<int, kQuickLootCategoryCount> ParseQuickLootCategoryOrder(std::string_view a_csv) noexcept;
+[[nodiscard]] std::string FormatQuickLootCategoryOrder(const std::array<int, kQuickLootCategoryCount>& a_order);
+
 struct ConfigData
 {
     // General toggles
     bool enabled{ true };
     float smoothingSpeed{ 0.25f };
-    bool powerArmorBypass{ true };
+    bool powerArmorBypass{ false };
     bool enableClamping{ true };
     float edgeMargin{ 40.0f };
 
     // Companion prompt distance & focus protection ([General])
     bool limitCompanionPromptDistance{ true };
-    float companionMaxDistance{ 160.0f };
+    float companionMaxDistance{ 120.0f };
     float companionCombatMaxDistance{ 80.0f };
     bool companionDeprioritizeLoot{ true };
+    bool blockHiddenCompanionInteractions{ true };
+    float grabHoldDelay{ 1.50f };
 
     // Context-aware 3D Offsets (world units)
     Vector3 doorOffset{ 0.0f, 0.0f, -20.0f };
@@ -82,6 +118,8 @@ struct ConfigData
     std::uint32_t modernNameColor{ 0xE0E8F0u };
     std::uint32_t modernIconColor{ 0xFFFFFFu };
     std::uint32_t modernAccentColor{ 0xF6C86Eu };
+    bool highlightCrimePrompts{ true };
+    std::uint32_t crimeTextColor{ 0xFF4D4Du };
 
     // Smooth Mini Info Card ([InfoCard])
     int infoCardPosition{ 3 };       // 0 = Off, 1 = Below, 2 = Above, 3 = Right, 4 = Left, 5 = Fixed Top-Right, 6 = Fixed Bottom-Right
@@ -128,6 +166,14 @@ struct ConfigData
     float qcButtonTextScale{ 0.95f };
     bool qcShowItemIcons{ true };
     std::string qcFont{};
+    int qcSortMode{ 0 };              // 0=Category Priority, 1=Value Desc, 2=Value/Weight Desc, 3=Alpha A-Z, 4=Weight Asc, 5=Weight Desc, 6=Vanilla Passive Mirror
+    int qcCategorySecondarySort{ 0 }; // 0=Value Desc, 1=Value/Weight Desc, 2=Alpha A-Z, 3=Weight Asc
+    bool qcPinQuestItems{ true };
+    bool qcPinLegendary{ true };
+    bool qcPinTaggedForSearch{ true };
+    bool qcPinCaps{ true };
+    int qcTakeDebounceMs{ 0 };        // 0..300 ms post-release anti-chatter debounce
+    std::array<int, kQuickLootCategoryCount> qcCategoryOrder{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18 };
 };
 
 class Config

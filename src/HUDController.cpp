@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cwchar>
 #include <functional>
+#include <initializer_list>
 #include <limits>
 #include <mutex>
 #include <unordered_map>
@@ -58,6 +59,65 @@ namespace HUDController
         return ContainsAsciiCaseInsensitive(a_verb, "HEAL") ||
                ContainsAsciiCaseInsensitive(a_verb, "STIMPAK") ||
                ContainsAsciiCaseInsensitive(a_verb, "REVIVE");
+    }
+
+    bool IsCrimeActionVerb(std::string_view a_verb) noexcept
+    {
+        const auto first = a_verb.find_first_not_of(" \t\r\n");
+        if (first == std::string_view::npos) {
+            return false;
+        }
+        const auto last = a_verb.find_last_not_of(" \t\r\n");
+        const std::string_view trimmed = a_verb.substr(first, last - first + 1);
+
+        auto eqIgnoreCase = [](std::string_view a_lhs, std::string_view a_rhs) noexcept {
+            if (a_lhs.size() != a_rhs.size()) {
+                return false;
+            }
+            for (std::size_t i = 0; i < a_lhs.size(); ++i) {
+                if (ToUpperAsciiChar(a_lhs[i]) != ToUpperAsciiChar(a_rhs[i])) {
+                    return false;
+                }
+            }
+            return true;
+        };
+
+        auto startsWithIgnoreCase = [&](std::string_view a_prefix) noexcept {
+            return trimmed.size() >= a_prefix.size() &&
+                   eqIgnoreCase(trimmed.substr(0, a_prefix.size()), a_prefix);
+        };
+
+        return eqIgnoreCase(trimmed, "STEAL") ||
+               startsWithIgnoreCase("STEAL ") ||
+               eqIgnoreCase(trimmed, "PICKPOCKET") ||
+               startsWithIgnoreCase("PICKPOCKET ") ||
+               eqIgnoreCase(trimmed, "TRESPASS");
+    }
+
+    bool ShouldBlockPostLootActivate(
+        std::int64_t a_nowMs,
+        std::int64_t a_lastTakeMs,
+        std::int64_t a_lastEmptyMs,
+        bool a_isJustPressed,
+        bool a_isHeld,
+        bool a_isAlreadyGrabbing) noexcept
+    {
+        if (a_isAlreadyGrabbing) {
+            return false;
+        }
+        if (a_lastEmptyMs > 0) {
+            const std::int64_t emptyAge = a_nowMs - a_lastEmptyMs;
+            if (emptyAge >= 0 && emptyAge <= kPostLootEmptyBlockMs) {
+                return true;
+            }
+        }
+        if (a_isHeld && !a_isJustPressed && a_lastTakeMs > 0) {
+            const std::int64_t takeAge = a_nowMs - a_lastTakeMs;
+            if (takeAge >= 0 && takeAge <= kPostLootGrabBlockMs) {
+                return true;
+            }
+        }
+        return false;
     }
 
     bool UpdateQuickLootCompanionProtection(
@@ -521,9 +581,14 @@ namespace HUDController
         for (auto& cur : a_stacks) {
             bool found = false;
             for (auto& existing : merged) {
-                if (existing.isEquipped == cur.isEquipped &&
+                if (!existing.isTemporary &&
+                    !cur.isTemporary &&
+                    (existing.baseFormID == 0 || cur.baseFormID == 0 || existing.baseFormID == cur.baseFormID) &&
+                    existing.isEquipped == cur.isEquipped &&
                     existing.isFavorite == cur.isFavorite &&
                     existing.isLegendary == cur.isLegendary &&
+                    existing.isQuestItem == cur.isQuestItem &&
+                    existing.quickLootCategory == cur.quickLootCategory &&
                     existing.stackSignature == cur.stackSignature &&
                     existing.name == cur.name) {
                     const std::uint64_t sum =
@@ -532,8 +597,13 @@ namespace HUDController
                         std::min<std::uint64_t>(std::numeric_limits<std::uint32_t>::max(), sum));
                     existing.isTaggedForSearch = existing.isTaggedForSearch || cur.isTaggedForSearch;
                     existing.isBetterThanEquipped = existing.isBetterThanEquipped || cur.isBetterThanEquipped;
+                    existing.isCaps = existing.isCaps || cur.isCaps;
+                    if (existing.baseFormID == 0) {
+                        existing.baseFormID = cur.baseFormID;
+                    }
                     if (existing.itemKind == TargetInfo::ItemKind::None) {
                         existing.itemKind = cur.itemKind;
+                        existing.quickLootCategory = cur.quickLootCategory;
                     }
                     found = true;
                     break;
@@ -1282,6 +1352,505 @@ namespace HUDController
         a_cache.expandEnabled = a_expandEnabled;
         a_cache.result = std::move(res);
         return a_cache.result;
+    }
+
+    QuickLootSortConfig QuickLootSortConfig::FromConfig(const ConfigData& a_cfg) noexcept
+    {
+        QuickLootSortConfig out;
+        out.sortMode = std::clamp(a_cfg.qcSortMode, 0, 6);
+        out.categorySecondarySort = std::clamp(a_cfg.qcCategorySecondarySort, 0, 3);
+        out.pinQuestItems = a_cfg.qcPinQuestItems;
+        out.pinLegendary = a_cfg.qcPinLegendary;
+        out.pinTaggedForSearch = a_cfg.qcPinTaggedForSearch;
+        out.pinCaps = a_cfg.qcPinCaps;
+        out.categoryOrder = a_cfg.qcCategoryOrder;
+        SanitizeQuickLootCategoryOrder(out.categoryOrder);
+        return out;
+    }
+
+    void SortQuickContainerItems(
+        std::vector<QuickContainerItemEntry>& a_items,
+        const QuickLootSortConfig& a_cfg)
+    {
+        if (a_items.size() <= 1 || a_cfg.sortMode == 6) {
+            return;
+        }
+
+        const int sortMode = std::clamp(a_cfg.sortMode, 0, 5);
+        const int secondaryMode = std::clamp(a_cfg.categorySecondarySort, 0, 3);
+
+        auto cleanOrder = a_cfg.categoryOrder;
+        SanitizeQuickLootCategoryOrder(cleanOrder);
+        std::array<int, kQuickLootCategoryCount> catRank{};
+        for (std::size_t r = 0; r < kQuickLootCategoryCount; ++r) {
+            catRank[static_cast<std::size_t>(cleanOrder[r])] = static_cast<int>(r);
+        }
+
+        struct SortKey
+        {
+            std::size_t index{ 0 };
+            int pinTier{ 4 };
+            int categoryRank{ static_cast<int>(kQuickLootCategoryCount) - 1 };
+            std::uint32_t value{ 0 };
+            float weight{ 0.0f };
+            double valuePerWeight{ 0.0 };
+            std::string sortNameLower;
+        };
+
+        std::vector<SortKey> keys;
+        keys.reserve(a_items.size());
+        for (std::size_t i = 0; i < a_items.size(); ++i) {
+            const auto& e = a_items[i];
+            SortKey k;
+            k.index = i;
+            if (a_cfg.pinQuestItems && e.isQuestItem) {
+                k.pinTier = 0;
+            } else if (a_cfg.pinLegendary && e.isLegendary) {
+                k.pinTier = 1;
+            } else if (a_cfg.pinTaggedForSearch && e.isTaggedForSearch) {
+                k.pinTier = 2;
+            } else if (a_cfg.pinCaps && e.isCaps) {
+                k.pinTier = 3;
+            } else {
+                k.pinTier = 4;
+            }
+
+            const int catIdx = static_cast<int>(e.quickLootCategory);
+            if (catIdx >= 0 && catIdx < static_cast<int>(kQuickLootCategoryCount)) {
+                k.categoryRank = catRank[static_cast<std::size_t>(catIdx)];
+            }
+
+            k.value = e.value;
+            k.weight = (std::isfinite(e.weight) && e.weight > 0.0f) ? e.weight : 0.0f;
+            if (k.value == 0u) {
+                k.valuePerWeight = 0.0;
+            } else if (k.weight <= 0.0f) {
+                k.valuePerWeight = 1e12 + static_cast<double>(k.value);
+            } else {
+                k.valuePerWeight = static_cast<double>(k.value) / static_cast<double>(k.weight);
+            }
+
+            k.sortNameLower = CleanLowerKey(e.name);
+            if (k.sortNameLower.empty()) {
+                k.sortNameLower = RawLowerKey(e.name);
+            }
+            keys.push_back(std::move(k));
+        }
+
+        auto cmpNameAsc = [&](const SortKey& a, const SortKey& b) -> int {
+            if (a.sortNameLower != b.sortNameLower) {
+                return (a.sortNameLower < b.sortNameLower) ? -1 : 1;
+            }
+            const auto& ea = a_items[a.index];
+            const auto& eb = a_items[b.index];
+            if (ea.name != eb.name) {
+                return (ea.name < eb.name) ? -1 : 1;
+            }
+            return 0;
+        };
+
+        auto cmpSecondary = [&](const SortKey& a, const SortKey& b, int mode) -> int {
+            switch (mode) {
+            case 0: // Value DESC
+                if (a.value != b.value) {
+                    return (a.value > b.value) ? -1 : 1;
+                }
+                break;
+            case 1: // Value / Weight DESC
+                if (a.valuePerWeight != b.valuePerWeight) {
+                    return (a.valuePerWeight > b.valuePerWeight) ? -1 : 1;
+                }
+                if (a.value != b.value) {
+                    return (a.value > b.value) ? -1 : 1;
+                }
+                break;
+            case 2: // Alphabetical A-Z
+                if (const int nc = cmpNameAsc(a, b); nc != 0) {
+                    return nc;
+                }
+                break;
+            case 3: // Weight ASC
+                if (a.weight != b.weight) {
+                    return (a.weight < b.weight) ? -1 : 1;
+                }
+                break;
+            default:
+                break;
+            }
+            return 0;
+        };
+
+        std::stable_sort(keys.begin(), keys.end(), [&](const SortKey& a, const SortKey& b) {
+            if (a.pinTier != b.pinTier) {
+                return a.pinTier < b.pinTier;
+            }
+
+            switch (sortMode) {
+            case 0: // Category Priority
+                if (a.categoryRank != b.categoryRank) {
+                    return a.categoryRank < b.categoryRank;
+                }
+                if (const int sc = cmpSecondary(a, b, secondaryMode); sc != 0) {
+                    return sc < 0;
+                }
+                break;
+            case 1: // Value DESC
+                if (a.value != b.value) {
+                    return a.value > b.value;
+                }
+                break;
+            case 2: // Value / Weight DESC
+                if (a.valuePerWeight != b.valuePerWeight) {
+                    return a.valuePerWeight > b.valuePerWeight;
+                }
+                if (a.value != b.value) {
+                    return a.value > b.value;
+                }
+                break;
+            case 3: // Alphabetical A-Z
+                if (const int nc = cmpNameAsc(a, b); nc != 0) {
+                    return nc < 0;
+                }
+                break;
+            case 4: // Weight ASC
+                if (a.weight != b.weight) {
+                    return a.weight < b.weight;
+                }
+                break;
+            case 5: // Weight DESC
+                if (a.weight != b.weight) {
+                    return a.weight > b.weight;
+                }
+                break;
+            default:
+                break;
+            }
+
+            if (const int nc = cmpNameAsc(a, b); nc != 0) {
+                return nc < 0;
+            }
+            const auto& ea = a_items[a.index];
+            const auto& eb = a_items[b.index];
+            if (ea.count != eb.count) {
+                return ea.count > eb.count;
+            }
+            if (a.value != b.value) {
+                return a.value > b.value;
+            }
+            if (ea.baseFormID != eb.baseFormID) {
+                return ea.baseFormID < eb.baseFormID;
+            }
+            if (ea.stackSignature != eb.stackSignature) {
+                return ea.stackSignature < eb.stackSignature;
+            }
+            if (ea.isEquipped != eb.isEquipped) {
+                return !ea.isEquipped;
+            }
+            if (ea.isTemporary != eb.isTemporary) {
+                return !ea.isTemporary;
+            }
+            return a.index < b.index;
+        });
+
+        std::vector<QuickContainerItemEntry> sorted;
+        sorted.reserve(a_items.size());
+        for (const auto& k : keys) {
+            sorted.push_back(std::move(a_items[k.index]));
+        }
+        a_items = std::move(sorted);
+    }
+
+    std::int32_t StepCustomQuickLootSelection(
+        std::int32_t a_currentIndex,
+        std::int32_t a_delta,
+        std::int32_t a_itemCount) noexcept
+    {
+        if (a_itemCount <= 0) {
+            return 0;
+        }
+        const std::int64_t next = static_cast<std::int64_t>(a_currentIndex) + static_cast<std::int64_t>(a_delta);
+        if (next <= 0) {
+            return 0;
+        }
+        const std::int64_t maxIdx = static_cast<std::int64_t>(a_itemCount) - 1;
+        if (next >= maxIdx) {
+            return static_cast<std::int32_t>(maxIdx);
+        }
+        return static_cast<std::int32_t>(next);
+    }
+
+    QuickLootTakeInputDecision StepQuickLootTakeLatch(
+        QuickLootTakeLatchState& a_state,
+        QuickLootTakePassState& a_pass,
+        const QuickLootTakeInput& a_in,
+        std::int64_t a_nowMs,
+        std::int64_t a_debounceMs,
+        std::int64_t a_staleLatchTimeoutMs) noexcept
+    {
+        const bool eventHasKey = (a_in.device != 0xFFFFFFFFu);
+        const bool matchesBoundKey =
+            a_state.hasBoundKey &&
+            eventHasKey &&
+            a_in.device == a_state.boundDevice &&
+            a_in.idCode == a_state.boundIdCode;
+
+        if (a_in.isReleased || !a_in.isPressed) {
+            if (a_pass.unlatchedThisPass &&
+                a_in.isTakeFamily &&
+                (a_pass.unlatchedDevice == 0xFFFFFFFFu || !eventHasKey ||
+                 (a_in.device == a_pass.unlatchedDevice && a_in.idCode == a_pass.unlatchedIdCode))) {
+                return { false, true };
+            }
+            if (a_state.latched && (matchesBoundKey || (!a_state.hasBoundKey && a_in.isTakeFamily))) {
+                a_state.latched = false;
+                a_state.hasBoundKey = false;
+                a_state.boundDevice = 0xFFFFFFFFu;
+                a_state.boundIdCode = 0xFFFFFFFFu;
+                a_state.lastReleaseMs = a_nowMs;
+                a_pass.unlatchedThisPass = true;
+                a_pass.unlatchedDevice = a_in.device;
+                a_pass.unlatchedIdCode = a_in.idCode;
+                return { false, a_in.isTakeFamily };
+            }
+            if (!a_state.latched &&
+                a_in.isTakeFamily &&
+                a_debounceMs > 0 &&
+                a_state.lastReleaseMs > 0 &&
+                a_nowMs >= a_state.lastReleaseMs &&
+                (a_nowMs - a_state.lastReleaseMs) < a_debounceMs) {
+                a_state.lastReleaseMs = a_nowMs;
+            }
+            return { false, false };
+        }
+
+        if (a_state.latched &&
+            a_in.isJustPressed &&
+            a_nowMs > a_state.latchSetMs &&
+            (a_nowMs - a_state.latchSetMs) >= a_staleLatchTimeoutMs) {
+            // Recover cleanly only if a fresh press arrives after losing key-up.
+            a_state.latched = false;
+            a_state.hasBoundKey = false;
+            a_state.boundDevice = 0xFFFFFFFFu;
+            a_state.boundIdCode = 0xFFFFFFFFu;
+        }
+
+        if (a_state.latched) {
+            if (a_in.isTakeFamily || matchesBoundKey) {
+                // Heartbeat keeps a long physical hold latched indefinitely across lag spikes.
+                a_state.latchSetMs = a_nowMs;
+                return { false, a_in.isTakeFamily };
+            }
+            return { false, false };
+        }
+
+        if (a_in.isJustPressed) {
+            if (a_in.canTake && !a_pass.acceptedTakeThisPass) {
+                a_state.latched = true;
+                a_state.hasBoundKey = eventHasKey;
+                a_state.boundDevice = a_in.device;
+                a_state.boundIdCode = a_in.idCode;
+                a_state.latchSetMs = a_nowMs;
+                const bool tooSoonAfterRelease =
+                    a_debounceMs > 0 &&
+                    a_state.lastReleaseMs > 0 &&
+                    a_nowMs >= a_state.lastReleaseMs &&
+                    (a_nowMs - a_state.lastReleaseMs) < a_debounceMs;
+                const bool tooSoonAfterPress =
+                    a_debounceMs > 0 &&
+                    a_state.lastTakePressMs > 0 &&
+                    a_nowMs >= a_state.lastTakePressMs &&
+                    (a_nowMs - a_state.lastTakePressMs) < a_debounceMs;
+                if (tooSoonAfterRelease || tooSoonAfterPress) {
+                    return { false, true };
+                }
+                a_state.lastTakePressMs = a_nowMs;
+                a_pass.acceptedTakeThisPass = true;
+                return { true, true };
+            }
+            if (a_in.suppressTakeFamilyPress && a_in.isTakeFamily) {
+                return { false, true };
+            }
+            return { false, false };
+        }
+
+        return { false, false };
+    }
+
+    SuppressedReadyDecision StepSuppressedSecondaryReady(
+        SuppressedReadyState& a_state,
+        const SuppressedReadyInput& a_in,
+        std::int64_t a_nowMs,
+        float a_holsterHoldSecs,
+        std::int64_t a_staleHoldTimeoutMs) noexcept
+    {
+        if (a_in.isQcTransfer) {
+            const bool swallow = (a_in.blockCompanionReady || a_state.held || a_in.alreadyHandledThisPass);
+            return { swallow, false, SuppressedReadyAction::kNone };
+        }
+
+        if (!a_in.isSecondaryActivate && !a_in.isReadyWeapon) {
+            return { false, false, SuppressedReadyAction::kNone };
+        }
+
+        const bool shouldBlockSecondary =
+            a_in.isSecondaryActivate &&
+            (a_in.blockCompanionReady || a_in.blockOrphanSecondary);
+        const bool shouldBlockReady =
+            a_in.isReadyWeapon &&
+            (a_in.blockCompanionReady || a_in.passHasBlockedSecondary);
+
+        if (a_in.alreadyHandledThisPass) {
+            return { true, false, SuppressedReadyAction::kNone };
+        }
+
+        if (a_state.held &&
+            a_in.isJustPressed &&
+            a_nowMs > a_state.startMs &&
+            (a_nowMs - a_state.startMs) > a_staleHoldTimeoutMs) {
+            a_state.held = false;
+            a_state.holstered = false;
+        }
+
+        const bool shouldStartHold =
+            a_in.isJustPressed &&
+            (shouldBlockSecondary || (shouldBlockReady && a_in.canCustomReadyAction));
+
+        if (shouldStartHold) {
+            if (a_in.canCustomReadyAction) {
+                a_state.held = true;
+                a_state.holstered = false;
+                a_state.startMs = a_nowMs;
+            }
+            return { true, true, SuppressedReadyAction::kNone };
+        }
+
+        if (a_state.held) {
+            if (a_in.isReleased) {
+                const bool alreadyHolstered = a_state.holstered;
+                a_state.held = false;
+                a_state.holstered = false;
+                SuppressedReadyAction act = SuppressedReadyAction::kNone;
+                if (!alreadyHolstered && a_in.canCustomReadyAction && a_in.weaponDrawn) {
+                    act = SuppressedReadyAction::kReload;
+                }
+                return { true, true, act };
+            }
+
+            if (a_in.isPressed) {
+                a_state.startMs = a_nowMs;
+                if (!a_state.holstered && a_in.heldDownSecs >= a_holsterHoldSecs) {
+                    a_state.holstered = true;
+                    if (a_in.canCustomReadyAction) {
+                        return {
+                            true,
+                            true,
+                            a_in.weaponDrawn
+                                ? SuppressedReadyAction::kSheath
+                                : SuppressedReadyAction::kDraw
+                        };
+                    }
+                }
+                return { true, true, SuppressedReadyAction::kNone };
+            }
+        }
+
+        if (shouldBlockSecondary) {
+            return { true, false, SuppressedReadyAction::kNone };
+        }
+
+        return { false, false, SuppressedReadyAction::kNone };
+    }
+
+    QuickLootCategory ClassifyWeaponQuickLootCategory(
+        std::uint8_t a_weaponType,
+        bool a_hasGrenadeOrMineKw,
+        bool a_hasHeavyKw,
+        bool a_hasExplosiveKw,
+        bool a_hasMeleeKw,
+        bool a_hasPistolKw,
+        bool a_hasRifleOrShotgunKw) noexcept
+    {
+        // WEAPON_TYPE: 0..6 = HandToHand / Melee1H / Melee2H / Staff, 10 = Grenade, 11 = Mine.
+        if (a_weaponType == 10u || a_weaponType == 11u || a_hasGrenadeOrMineKw) {
+            return QuickLootCategory::Explosive;
+        }
+        // Check HeavyGun before Explosive so Fat Man / Missile Launcher land in Heavy Weapons.
+        if (a_hasHeavyKw) {
+            return QuickLootCategory::HeavyWeapon;
+        }
+        if (a_hasExplosiveKw) {
+            return QuickLootCategory::Explosive;
+        }
+        if (a_weaponType <= 6u || a_hasMeleeKw) {
+            return QuickLootCategory::Melee;
+        }
+        if (a_hasPistolKw) {
+            return QuickLootCategory::Pistol;
+        }
+        if (a_hasRifleOrShotgunKw) {
+            return QuickLootCategory::Rifle;
+        }
+        return QuickLootCategory::Rifle;
+    }
+
+    QuickLootCategory ClassifyArmorQuickLootCategory(
+        bool a_hasPowerArmorKw,
+        bool a_hasArmorKw,
+        bool a_hasClothingKw,
+        std::uint16_t a_armorRating,
+        bool a_hasExtraResist) noexcept
+    {
+        if (a_hasPowerArmorKw) {
+            return QuickLootCategory::PowerArmor;
+        }
+        if (a_hasClothingKw && !a_hasArmorKw && a_armorRating == 0u && !a_hasExtraResist) {
+            return QuickLootCategory::Clothing;
+        }
+        if (a_hasArmorKw || a_armorRating > 0u || a_hasExtraResist) {
+            return QuickLootCategory::Armor;
+        }
+        return QuickLootCategory::Clothing;
+    }
+
+    QuickLootCategory ClassifyAidQuickLootCategory(
+        bool a_isMedicineFlag,
+        bool a_isFoodFlag,
+        bool a_hasMedicineKw,
+        bool a_hasChemKw,
+        bool a_hasDrinkKw,
+        bool a_hasFoodKw,
+        bool a_hasAddiction) noexcept
+    {
+        if (a_isMedicineFlag || a_hasMedicineKw) {
+            return QuickLootCategory::Medicine;
+        }
+        // Check drinks before addiction so Alcohol (which has an addiction effect) stays Drink.
+        if (a_hasDrinkKw) {
+            return QuickLootCategory::Drink;
+        }
+        if (a_hasChemKw) {
+            return QuickLootCategory::Chem;
+        }
+        if (a_hasFoodKw || a_isFoodFlag) {
+            return QuickLootCategory::Food;
+        }
+        if (a_hasAddiction) {
+            return QuickLootCategory::Chem;
+        }
+        return QuickLootCategory::Medicine;
+    }
+
+    bool IsQuickContainerWorkbenchTarget(
+        TargetInfo::ItemKind a_targetKind,
+        bool a_engineValid,
+        bool a_isPowerArmorMode,
+        bool a_isCraftingOrWorkshopMode) noexcept
+    {
+        if (a_engineValid && a_isPowerArmorMode) {
+            return false;
+        }
+        return (a_targetKind == TargetInfo::ItemKind::Furniture) ||
+               (a_engineValid && a_isCraftingOrWorkshopMode);
     }
 
 #ifndef FAP_UNIT_TEST
@@ -2341,19 +2910,12 @@ namespace HUDController
                    !TargetInfo::CleanDisplayName(trimmedDisplay, true).empty();
         }
 
-        void ReadQuickContainerData(
-            Controller& a_controller,
-            std::uint32_t a_ownerFormID,
+        void ReadQuickContainerHeader(
             const RE::Scaleform::GFx::Value& a_qcClip,
             const std::string& a_fallbackHeader,
             const EngineQuickContainerSnapshot& a_engineSnap,
-            const CachedInventorySnapshot& a_invSnap,
-            int a_maxVisibleRows,
-            bool a_expandInventoryList,
-            int a_prevSelectedIdx,
             QuickContainerOverlay& a_out)
         {
-            // 1. Header title
             if (!TryReadStringMember(a_qcClip, "containerName"sv, ""sv, a_out.headerTitle)) {
                 RE::Scaleform::GFx::Value bracket;
                 RE::Scaleform::GFx::Value nameMc;
@@ -2368,6 +2930,429 @@ namespace HUDController
             if (a_out.headerTitle.empty()) {
                 a_out.headerTitle = a_fallbackHeader;
             }
+        }
+
+        void ReadQuickContainerButtons(
+            const RE::Scaleform::GFx::Value& a_qcClip,
+            const EngineQuickContainerSnapshot& a_engineSnap,
+            QuickContainerOverlay& a_out)
+        {
+            bool hasPrimaryBtnSource = false;
+            ReadButtonHintBar(a_qcClip, a_out.buttons, hasPrimaryBtnSource);
+            if (a_out.buttons.empty() && a_engineSnap.valid) {
+                if (!a_engineSnap.aButtonText.empty()) {
+                    AppendUniqueButton(a_out.buttons, {
+                        "E",
+                        TargetInfo::ToUpperAscii(TranslateScaleformKey(a_engineSnap.aButtonText)),
+                        a_engineSnap.buttonAEnabled
+                    });
+                }
+                if (a_engineSnap.buttonXEnabled) {
+                    AppendUniqueButton(a_out.buttons, { "R", "TRANSFER", true });
+                }
+                if (!a_engineSnap.perkButtonText.empty() && a_engineSnap.perkButtonEnabled) {
+                    AppendUniqueButton(a_out.buttons, {
+                        "SPACE",
+                        TargetInfo::ToUpperAscii(TranslateScaleformKey(a_engineSnap.perkButtonText)),
+                        true
+                    });
+                }
+            }
+        }
+
+        [[nodiscard]] bool IsWeapInstanceData(const RE::TBO_InstanceData* a_ptr)
+        {
+            if (!a_ptr) {
+                return false;
+            }
+            static const std::uintptr_t weapInstVtbl =
+                REL::Relocation<std::uintptr_t>{ RE::TESObjectWEAP::InstanceData::VTABLE[0] }.address();
+            static const std::uintptr_t weapDataVtbl =
+                REL::Relocation<std::uintptr_t>{ RE::TESObjectWEAP::Data::VTABLE[0] }.address();
+            const auto vtbl = *reinterpret_cast<const std::uintptr_t*>(a_ptr);
+            return vtbl == weapInstVtbl || vtbl == weapDataVtbl;
+        }
+
+        [[nodiscard]] bool IsArmoInstanceData(const RE::TBO_InstanceData* a_ptr)
+        {
+            if (!a_ptr) {
+                return false;
+            }
+            static const std::uintptr_t armoInstVtbl =
+                REL::Relocation<std::uintptr_t>{ RE::TESObjectARMO::InstanceData::VTABLE[0] }.address();
+            const auto vtbl = *reinterpret_cast<const std::uintptr_t*>(a_ptr);
+            return vtbl == armoInstVtbl;
+        }
+
+        struct CachedQuickLootKeywords
+        {
+            RE::BGSKeyword* weapGrenade{ nullptr };
+            RE::BGSKeyword* weapMine{ nullptr };
+            RE::BGSKeyword* weapThrown{ nullptr };
+            RE::BGSKeyword* weapHeavy{ nullptr };
+            RE::BGSKeyword* weapExplosive{ nullptr };
+            RE::BGSKeyword* weapMinigun{ nullptr };
+            RE::BGSKeyword* weapMissile{ nullptr };
+            RE::BGSKeyword* weapFatman{ nullptr };
+            RE::BGSKeyword* weapFlamer{ nullptr };
+            RE::BGSKeyword* weapGatlingLaser{ nullptr };
+            RE::BGSKeyword* weapBroadsider{ nullptr };
+            RE::BGSKeyword* weapJunkJet{ nullptr };
+            RE::BGSKeyword* weapCryolater{ nullptr };
+            RE::BGSKeyword* weapMelee1H{ nullptr };
+            RE::BGSKeyword* weapMelee2H{ nullptr };
+            RE::BGSKeyword* weapUnarmed{ nullptr };
+            RE::BGSKeyword* weapHandToHand{ nullptr };
+            RE::BGSKeyword* weapRipper{ nullptr };
+            RE::BGSKeyword* weapShishkebab{ nullptr };
+            RE::BGSKeyword* weapPistol{ nullptr };
+            RE::BGSKeyword* weapRifle{ nullptr };
+            RE::BGSKeyword* weapShotgun{ nullptr };
+            RE::BGSKeyword* weapAssaultRifle{ nullptr };
+            RE::BGSKeyword* weapSniper{ nullptr };
+            RE::BGSKeyword* weapAlienBlaster{ nullptr };
+            RE::BGSKeyword* weapFlareGun{ nullptr };
+            RE::BGSKeyword* weapGammaGun{ nullptr };
+
+            RE::BGSKeyword* armoPower{ nullptr };
+            RE::BGSKeyword* objArmor{ nullptr };
+            RE::BGSKeyword* armoHelmet{ nullptr };
+            RE::BGSKeyword* armoHat{ nullptr };
+
+            RE::BGSKeyword* objStimpak{ nullptr };
+            RE::BGSKeyword* objChem{ nullptr };
+            RE::BGSKeyword* caChemBad{ nullptr };
+            RE::BGSKeyword* objDrink{ nullptr };
+            RE::BGSKeyword* objWater{ nullptr };
+            RE::BGSKeyword* objNukaCola{ nullptr };
+            RE::BGSKeyword* objAlcohol{ nullptr };
+            RE::BGSKeyword* objCaffeinated{ nullptr };
+            RE::BGSKeyword* objExtraCaffeinated{ nullptr };
+            RE::BGSKeyword* caDrink{ nullptr };
+            RE::BGSKeyword* objFood{ nullptr };
+        };
+
+        [[nodiscard]] const CachedQuickLootKeywords& GetCachedQuickLootKeywords()
+        {
+            static const CachedQuickLootKeywords s_kw = []() {
+                auto findKw = [](const char* a_editorID) -> RE::BGSKeyword* {
+                    return RE::TESForm::GetFormByEditorID<RE::BGSKeyword>(RE::BSFixedString(a_editorID));
+                };
+                CachedQuickLootKeywords k{};
+                k.weapGrenade = findKw("WeaponTypeGrenade");
+                k.weapMine = findKw("WeaponTypeMine");
+                k.weapThrown = findKw("WeaponTypeThrown");
+                k.weapHeavy = findKw("WeaponTypeHeavyGun");
+                k.weapExplosive = findKw("WeaponTypeExplosive");
+                k.weapMinigun = findKw("WeaponTypeMinigun");
+                k.weapMissile = findKw("WeaponTypeMissileLauncher");
+                k.weapFatman = findKw("WeaponTypeFatman");
+                k.weapFlamer = findKw("WeaponTypeFlamer");
+                k.weapGatlingLaser = findKw("WeaponTypeGatlingLaser");
+                k.weapBroadsider = findKw("WeaponTypeBroadsider");
+                k.weapJunkJet = findKw("WeaponTypeJunkJet");
+                k.weapCryolater = findKw("WeaponTypeCryolater");
+                k.weapMelee1H = findKw("WeaponTypeMelee1H");
+                k.weapMelee2H = findKw("WeaponTypeMelee2H");
+                k.weapUnarmed = findKw("WeaponTypeUnarmed");
+                k.weapHandToHand = findKw("WeaponTypeHandToHand");
+                k.weapRipper = findKw("WeaponTypeRipper");
+                k.weapShishkebab = findKw("WeaponTypeShishkebab");
+                k.weapPistol = findKw("WeaponTypePistol");
+                k.weapRifle = findKw("WeaponTypeRifle");
+                k.weapShotgun = findKw("WeaponTypeShotgun");
+                k.weapAssaultRifle = findKw("WeaponTypeAssaultRifle");
+                k.weapSniper = findKw("WeaponTypeSniper");
+                k.weapAlienBlaster = findKw("WeaponTypeAlienBlaster");
+                k.weapFlareGun = findKw("WeaponTypeFlareGun");
+                k.weapGammaGun = findKw("WeaponTypeGammaGun");
+
+                k.armoPower = findKw("ArmorTypePower");
+                k.objArmor = findKw("ObjectTypeArmor");
+                k.armoHelmet = findKw("ArmorTypeHelmet");
+                k.armoHat = findKw("ArmorTypeHat");
+
+                k.objStimpak = findKw("ObjectTypeStimpak");
+                k.objChem = findKw("ObjectTypeChem");
+                k.caChemBad = findKw("CA_ObjType_ChemBad");
+                k.objDrink = findKw("ObjectTypeDrink");
+                k.objWater = findKw("ObjectTypeWater");
+                k.objNukaCola = findKw("ObjectTypeNukaCola");
+                k.objAlcohol = findKw("ObjectTypeAlcohol");
+                k.objCaffeinated = findKw("ObjectTypeCaffeinated");
+                k.objExtraCaffeinated = findKw("ObjectTypeExtraCaffeinated");
+                k.caDrink = findKw("CA_ObjType_Drink");
+                k.objFood = findKw("ObjectTypeFood");
+                return k;
+            }();
+            return s_kw;
+        }
+
+        [[nodiscard]] bool HasKeywordPtr(
+            const RE::BGSKeywordForm* a_baseKw,
+            const RE::TBO_InstanceData* a_instData,
+            const RE::BGSKeyword* a_kw) noexcept
+        {
+            return a_baseKw && a_kw && a_baseKw->HasKeyword(a_kw, a_instData);
+        }
+
+        [[nodiscard]] bool KeywordListContainsAny(
+            const RE::BGSKeywordForm* a_activeKw,
+            std::initializer_list<std::string_view> a_needles) noexcept
+        {
+            if (!a_activeKw || !a_activeKw->keywords) {
+                return false;
+            }
+            const std::uint32_t count = a_activeKw->GetNumKeywords();
+            for (std::uint32_t i = 0; i < count; ++i) {
+                const auto optKw = a_activeKw->GetKeywordAt(i);
+                if (!optKw.has_value() || !optKw.value()) {
+                    continue;
+                }
+                const char* rawId = optKw.value()->formEditorID.c_str();
+                if (!rawId || rawId[0] == '\0') {
+                    continue;
+                }
+                const std::string_view edid(rawId);
+                for (const auto needle : a_needles) {
+                    if (ContainsAsciiCaseInsensitive(edid, needle)) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        [[nodiscard]] QuickLootCategory ClassifyQuickLootCategory(
+            const RE::TESBoundObject* a_obj,
+            const RE::TBO_InstanceData* a_instData) noexcept
+        {
+            if (!a_obj) {
+                return QuickLootCategory::Misc;
+            }
+
+            switch (a_obj->GetFormType()) {
+            case RE::ENUM_FORM_ID::kKEYM:
+                return QuickLootCategory::Key;
+            case RE::ENUM_FORM_ID::kAMMO:
+                return QuickLootCategory::Ammo;
+            case RE::ENUM_FORM_ID::kALCH: {
+                const auto* alch = a_obj->As<RE::AlchemyItem>();
+                const auto& kw = GetCachedQuickLootKeywords();
+                const RE::BGSKeywordForm* baseKw = alch ? static_cast<const RE::BGSKeywordForm*>(alch) : nullptr;
+                const std::uint32_t flags = alch ? alch->data.flags : 0u;
+                const bool isMedicineFlag = (flags & 0x00010000u) != 0u;
+                const bool isFoodFlag = (flags & 0x00000002u) != 0u;
+                const bool hasAddiction = (alch != nullptr) &&
+                    (alch->data.addictionItem != nullptr || alch->data.addictionChance > 0.0f);
+
+                bool hasMedicineKw = HasKeywordPtr(baseKw, a_instData, kw.objStimpak);
+                bool hasDrinkKw =
+                    HasKeywordPtr(baseKw, a_instData, kw.objDrink) ||
+                    HasKeywordPtr(baseKw, a_instData, kw.objWater) ||
+                    HasKeywordPtr(baseKw, a_instData, kw.objNukaCola) ||
+                    HasKeywordPtr(baseKw, a_instData, kw.objAlcohol) ||
+                    HasKeywordPtr(baseKw, a_instData, kw.objCaffeinated) ||
+                    HasKeywordPtr(baseKw, a_instData, kw.objExtraCaffeinated) ||
+                    HasKeywordPtr(baseKw, a_instData, kw.caDrink);
+                bool hasChemKw =
+                    HasKeywordPtr(baseKw, a_instData, kw.objChem) ||
+                    HasKeywordPtr(baseKw, a_instData, kw.caChemBad);
+                bool hasFoodKw = HasKeywordPtr(baseKw, a_instData, kw.objFood);
+
+                if (!isMedicineFlag && !hasMedicineKw && !hasDrinkKw && !hasChemKw && !hasFoodKw && baseKw) {
+                    hasMedicineKw = KeywordListContainsAny(baseKw, { "Stimpak", "Medicine", "Medkit", "FirstAid", "Antibiotic" });
+                    hasDrinkKw = KeywordListContainsAny(baseKw, { "Drink", "Beverage", "Water", "Alcohol", "NukaCola", "Beer", "Liquor", "Soda" });
+                    hasChemKw = KeywordListContainsAny(baseKw, { "Chem", "Drug", "Narcotic" });
+                    hasFoodKw = KeywordListContainsAny(baseKw, { "Food", "Meal", "Meat", "Fruit", "Vegetable" });
+                }
+
+                return ClassifyAidQuickLootCategory(
+                    isMedicineFlag,
+                    isFoodFlag,
+                    hasMedicineKw,
+                    hasChemKw,
+                    hasDrinkKw,
+                    hasFoodKw,
+                    hasAddiction);
+            }
+            case RE::ENUM_FORM_ID::kWEAP: {
+                const auto* weap = a_obj->As<RE::TESObjectWEAP>();
+                if (!weap) {
+                    return QuickLootCategory::Rifle;
+                }
+                const auto* weapInst = IsWeapInstanceData(a_instData)
+                    ? static_cast<const RE::TESObjectWEAP::InstanceData*>(a_instData)
+                    : &weap->weaponData;
+                const std::uint8_t wType = weapInst ? static_cast<std::uint8_t>(weapInst->type.get()) : 9u;
+                const auto& kw = GetCachedQuickLootKeywords();
+                const RE::BGSKeywordForm* baseKw = static_cast<const RE::BGSKeywordForm*>(weap);
+                const RE::BGSKeywordForm* activeKw = (weapInst && weapInst->keywords) ? weapInst->keywords : baseKw;
+
+                bool hasGrenadeOrMineKw =
+                    HasKeywordPtr(baseKw, a_instData, kw.weapGrenade) ||
+                    HasKeywordPtr(baseKw, a_instData, kw.weapMine) ||
+                    HasKeywordPtr(baseKw, a_instData, kw.weapThrown);
+                bool hasHeavyKw =
+                    HasKeywordPtr(baseKw, a_instData, kw.weapHeavy) ||
+                    HasKeywordPtr(baseKw, a_instData, kw.weapMinigun) ||
+                    HasKeywordPtr(baseKw, a_instData, kw.weapMissile) ||
+                    HasKeywordPtr(baseKw, a_instData, kw.weapFatman) ||
+                    HasKeywordPtr(baseKw, a_instData, kw.weapFlamer) ||
+                    HasKeywordPtr(baseKw, a_instData, kw.weapGatlingLaser) ||
+                    HasKeywordPtr(baseKw, a_instData, kw.weapBroadsider) ||
+                    HasKeywordPtr(baseKw, a_instData, kw.weapJunkJet) ||
+                    HasKeywordPtr(baseKw, a_instData, kw.weapCryolater);
+                bool hasExplosiveKw = HasKeywordPtr(baseKw, a_instData, kw.weapExplosive);
+                bool hasMeleeKw =
+                    HasKeywordPtr(baseKw, a_instData, kw.weapMelee1H) ||
+                    HasKeywordPtr(baseKw, a_instData, kw.weapMelee2H) ||
+                    HasKeywordPtr(baseKw, a_instData, kw.weapUnarmed) ||
+                    HasKeywordPtr(baseKw, a_instData, kw.weapHandToHand) ||
+                    HasKeywordPtr(baseKw, a_instData, kw.weapRipper) ||
+                    HasKeywordPtr(baseKw, a_instData, kw.weapShishkebab);
+                bool hasPistolKw =
+                    HasKeywordPtr(baseKw, a_instData, kw.weapPistol) ||
+                    HasKeywordPtr(baseKw, a_instData, kw.weapAlienBlaster) ||
+                    HasKeywordPtr(baseKw, a_instData, kw.weapFlareGun) ||
+                    HasKeywordPtr(baseKw, a_instData, kw.weapGammaGun);
+                bool hasRifleKw =
+                    HasKeywordPtr(baseKw, a_instData, kw.weapRifle) ||
+                    HasKeywordPtr(baseKw, a_instData, kw.weapShotgun) ||
+                    HasKeywordPtr(baseKw, a_instData, kw.weapAssaultRifle) ||
+                    HasKeywordPtr(baseKw, a_instData, kw.weapSniper);
+
+                if (!hasGrenadeOrMineKw && !hasHeavyKw && !hasExplosiveKw &&
+                    !hasMeleeKw && !hasPistolKw && !hasRifleKw && activeKw) {
+                    hasGrenadeOrMineKw = KeywordListContainsAny(activeKw, { "Grenade", "Mine", "Thrown" });
+                    hasHeavyKw = KeywordListContainsAny(activeKw, { "HeavyGun", "HeavyWeapon", "Minigun", "Launcher", "Fatman", "Flamer", "Gatling" });
+                    hasExplosiveKw = KeywordListContainsAny(activeKw, { "Explosive" });
+                    hasMeleeKw = KeywordListContainsAny(activeKw, { "Melee", "Unarmed", "HandToHand", "Sword", "Blade" });
+                    hasPistolKw = KeywordListContainsAny(activeKw, { "Pistol", "Handgun", "Sidearm", "Revolver" });
+                    hasRifleKw = KeywordListContainsAny(activeKw, { "Rifle", "Shotgun", "Carbine", "Sniper", "Submachine", "SMG" });
+                }
+
+                return ClassifyWeaponQuickLootCategory(
+                    wType,
+                    hasGrenadeOrMineKw,
+                    hasHeavyKw,
+                    hasExplosiveKw,
+                    hasMeleeKw,
+                    hasPistolKw,
+                    hasRifleKw);
+            }
+            case RE::ENUM_FORM_ID::kARMO: {
+                const auto* armo = a_obj->As<RE::TESObjectARMO>();
+                if (!armo) {
+                    return QuickLootCategory::Armor;
+                }
+                const auto* armoInst = IsArmoInstanceData(a_instData)
+                    ? static_cast<const RE::TESObjectARMO::InstanceData*>(a_instData)
+                    : &armo->data;
+                const std::uint16_t rating = armoInst ? armoInst->rating : armo->data.rating;
+                const auto* dmgTypes = (armoInst && armoInst->damageTypes) ? armoInst->damageTypes : armo->data.damageTypes;
+                const bool hasExtraResist = (dmgTypes != nullptr && !dmgTypes->empty());
+
+                const auto& kw = GetCachedQuickLootKeywords();
+                const RE::BGSKeywordForm* baseKw = static_cast<const RE::BGSKeywordForm*>(armo);
+                const RE::BGSKeywordForm* activeKw = (armoInst && armoInst->keywords) ? armoInst->keywords : baseKw;
+
+                bool hasPowerArmorKw = HasKeywordPtr(baseKw, a_instData, kw.armoPower);
+                bool hasArmorKw =
+                    HasKeywordPtr(baseKw, a_instData, kw.objArmor) ||
+                    HasKeywordPtr(baseKw, a_instData, kw.armoHelmet);
+                bool hasClothingKw = HasKeywordPtr(baseKw, a_instData, kw.armoHat);
+
+                if (!hasPowerArmorKw && activeKw) {
+                    hasPowerArmorKw = KeywordListContainsAny(activeKw, { "PowerArmor", "ArmorTypePower" });
+                }
+                if (!hasArmorKw && activeKw) {
+                    hasArmorKw = KeywordListContainsAny(activeKw, { "ObjectTypeArmor", "ArmorTypeHelmet", "ArmorBody", "ArmorLimb" });
+                }
+                if (!hasClothingKw && activeKw) {
+                    hasClothingKw = KeywordListContainsAny(activeKw, { "Clothing", "Outfit", "Apparel", "Hat", "Glasses", "Underarmor" });
+                }
+
+                return ClassifyArmorQuickLootCategory(
+                    hasPowerArmorKw,
+                    hasArmorKw,
+                    hasClothingKw,
+                    rating,
+                    hasExtraResist);
+            }
+            case RE::ENUM_FORM_ID::kOMOD:
+                return QuickLootCategory::Mod;
+            case RE::ENUM_FORM_ID::kBOOK:
+                return QuickLootCategory::BookNote;
+            case RE::ENUM_FORM_ID::kNOTE:
+                return QuickLootCategory::Holotape;
+            case RE::ENUM_FORM_ID::kMISC: {
+                const auto* misc = a_obj->As<RE::TESObjectMISC>();
+                if (misc && misc->IsLooseMod()) {
+                    return QuickLootCategory::Mod;
+                }
+                if (misc && misc->componentData && !misc->componentData->empty()) {
+                    return QuickLootCategory::Junk;
+                }
+                return QuickLootCategory::Misc;
+            }
+            default:
+                return QuickLootCategory::Misc;
+            }
+        }
+
+        [[nodiscard]] bool IsObjectTaggedForSearch(
+            const RE::TESBoundObject* a_obj,
+            RE::FavoritesManager* a_favMgr) noexcept
+        {
+            if (!a_obj || !a_favMgr || a_favMgr->favoritedComponents.empty()) {
+                return false;
+            }
+            if (const auto* misc = a_obj->As<RE::TESObjectMISC>(); misc && misc->componentData) {
+                for (const auto& comp : *misc->componentData) {
+                    if (comp.first) {
+                        if (const auto* compBound = comp.first->As<RE::TESBoundObject>();
+                            compBound && a_favMgr->favoritedComponents.contains(compBound)) {
+                            return true;
+                        }
+                    }
+                }
+            } else if (a_obj->GetFormType() == RE::ENUM_FORM_ID::kCMPO) {
+                return a_favMgr->favoritedComponents.contains(a_obj);
+            }
+            return false;
+        }
+
+        [[nodiscard]] bool IsStackQuestObject(RE::ExtraDataList* a_stackExtra) noexcept
+        {
+            if (!a_stackExtra) {
+                return false;
+            }
+            if (auto* aliasArr = a_stackExtra->GetByType<RE::ExtraAliasInstanceArray>()) {
+                RE::BSAutoReadLock aliasLock{ aliasArr->aliasArrayLock };
+                for (const auto& inst : aliasArr->aliasArray) {
+                    if (inst.alias && inst.alias->IsQuestObject()) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        void ReadQuickContainerData(
+            Controller& a_controller,
+            std::uint32_t a_ownerFormID,
+            const RE::Scaleform::GFx::Value& a_qcClip,
+            const std::string& a_fallbackHeader,
+            const EngineQuickContainerSnapshot& a_engineSnap,
+            const CachedInventorySnapshot& a_invSnap,
+            int a_maxVisibleRows,
+            bool a_expandInventoryList,
+            int a_prevSelectedIdx,
+            QuickContainerOverlay& a_out)
+        {
+            // 1. Header title
+            ReadQuickContainerHeader(a_qcClip, a_fallbackHeader, a_engineSnap, a_out);
 
             // 2. Active visible clip probe via ItemClipsA
             RE::Scaleform::GFx::Value listMc;
@@ -2672,27 +3657,7 @@ namespace HUDController
             }
 
             // 4. Button hints (Scaleform public clips first, then engine fallback)
-            bool hasPrimaryBtnSource = false;
-            ReadButtonHintBar(a_qcClip, a_out.buttons, hasPrimaryBtnSource);
-            if (a_out.buttons.empty() && a_engineSnap.valid) {
-                if (!a_engineSnap.aButtonText.empty()) {
-                    AppendUniqueButton(a_out.buttons, {
-                        "E",
-                        TargetInfo::ToUpperAscii(TranslateScaleformKey(a_engineSnap.aButtonText)),
-                        a_engineSnap.buttonAEnabled
-                    });
-                }
-                if (a_engineSnap.buttonXEnabled) {
-                    AppendUniqueButton(a_out.buttons, { "R", "TRANSFER", true });
-                }
-                if (!a_engineSnap.perkButtonText.empty() && a_engineSnap.perkButtonEnabled) {
-                    AppendUniqueButton(a_out.buttons, {
-                        "SPACE",
-                        TargetInfo::ToUpperAscii(TranslateScaleformKey(a_engineSnap.perkButtonText)),
-                        true
-                    });
-                }
-            }
+            ReadQuickContainerButtons(a_qcClip, a_engineSnap, a_out);
         }
 
         void ReadClipBaseTransform(const RE::Scaleform::GFx::Value& a_clip, HUDFrameInput& a_in)
@@ -2847,6 +3812,30 @@ namespace HUDController
             }
             return a_actor->IsFollowing();
         }
+
+        inline void SwallowButtonEvent(RE::InputEvent* a_ev, RE::ButtonEvent* a_btn) noexcept
+        {
+            if (a_ev) {
+                a_ev->handled = RE::InputEvent::HANDLED_RESULT::kStop;
+            }
+            if (a_btn) {
+                a_btn->disabled = true;
+            }
+        }
+
+        [[nodiscard]] bool IsEventStoppedOrDisabled(const RE::InputEvent* a_event) noexcept
+        {
+            if (!a_event) {
+                return false;
+            }
+            if (a_event->handled.get() == RE::InputEvent::HANDLED_RESULT::kStop) {
+                return true;
+            }
+            if (const auto* btn = a_event->As<RE::ButtonEvent>()) {
+                return btn->QDisabled();
+            }
+            return false;
+        }
     }
 
     void Controller::Install()
@@ -2867,6 +3856,550 @@ namespace HUDController
 
         EnsurePickRefSink();
         EnsureActivateHook();
+        EnsureMenuControlsHook();
+        EnsurePlayerControlsHooks();
+        EnsureUIInputHook();
+        EnsureHUDDataModelHook();
+    }
+
+    void Controller::EnsureMenuControlsHook()
+    {
+        if (_menuControlsInputHooked.load(std::memory_order_acquire)) {
+            return;
+        }
+
+        auto* mc = RE::MenuControls::GetSingleton();
+        if (!mc) {
+            return;
+        }
+
+        if (!_menuControlsInputHooked.exchange(true)) {
+            auto* receiver = static_cast<RE::BSInputEventReceiver*>(mc);
+            const auto vtableAddr = *reinterpret_cast<const std::uintptr_t*>(receiver);
+            const auto origSlot = reinterpret_cast<const std::uintptr_t*>(vtableAddr)[0];
+            _origMenuControlsPerformInputProcessing.store(origSlot, std::memory_order_release);
+            (void)REL::Relocation<std::uintptr_t>{ vtableAddr }.write_vfunc(0, &Hook_MenuControlsPerformInputProcessing);
+            logger::info("Hooked MenuControls::PerformInputProcessing at vtable {:X}", vtableAddr);
+        }
+    }
+
+    void Controller::EnsureUIInputHook()
+    {
+        if (_uiInputHooked.load(std::memory_order_acquire)) {
+            return;
+        }
+
+        auto* ui = RE::UI::GetSingleton();
+        if (!ui) {
+            return;
+        }
+
+        if (!_uiInputHooked.exchange(true)) {
+            auto* receiver = static_cast<RE::BSInputEventReceiver*>(ui);
+            const auto vtableAddr = *reinterpret_cast<const std::uintptr_t*>(receiver);
+            const auto origSlot = reinterpret_cast<const std::uintptr_t*>(vtableAddr)[0];
+            _origUIPerformInputProcessing.store(origSlot, std::memory_order_release);
+            (void)REL::Relocation<std::uintptr_t>{ vtableAddr }.write_vfunc(0, &Hook_UIPerformInputProcessing);
+            logger::info("Hooked UI::PerformInputProcessing at vtable {:X}", vtableAddr);
+        }
+    }
+
+    void Controller::EnsureHUDDataModelHook()
+    {
+        if (_hudDataModelInputHooked.load(std::memory_order_acquire)) {
+            return;
+        }
+
+        const auto resolved = REL::IDDatabase::get().resolve(RE::VTABLE::HUDDataModel[0]);
+        if (!resolved.rva || *resolved.rva == 0) {
+            static bool warned = false;
+            if (!warned) {
+                warned = true;
+                logger::warn("Could not resolve HUDDataModel vtable; skipping input hook");
+            }
+            return;
+        }
+
+        const auto vtableAddr = REL::Module::get().base() + *resolved.rva;
+        if (vtableAddr == 0) {
+            return;
+        }
+
+        if (!_hudDataModelInputHooked.exchange(true)) {
+            const auto origSlot = *reinterpret_cast<const std::uintptr_t*>(vtableAddr);
+            _origHUDDataModelPerformInputProcessing.store(origSlot, std::memory_order_release);
+            (void)REL::Relocation<std::uintptr_t>{ vtableAddr }.write_vfunc(0, &Hook_HUDDataModelPerformInputProcessing);
+            logger::info("Hooked HUDDataModel::PerformInputProcessing at vtable {:X}", vtableAddr);
+        }
+    }
+
+    void Controller::EnsurePlayerControlsHooks()
+    {
+        if (_playerControlsInputHooked.load(std::memory_order_acquire) &&
+            _readyWeaponHooked.load(std::memory_order_acquire)) {
+            return;
+        }
+
+        auto* pc = RE::PlayerControls::GetSingleton();
+        if (!pc) {
+            return;
+        }
+
+        if (!_playerControlsInputHooked.exchange(true)) {
+            // PlayerControls inherits BSInputEventReceiver privately at offset 0x0.
+            const auto vtableAddr = *reinterpret_cast<const std::uintptr_t*>(pc);
+            const auto origSlot = reinterpret_cast<const std::uintptr_t*>(vtableAddr)[0];
+            _origPlayerControlsPerformInputProcessing.store(origSlot, std::memory_order_release);
+            (void)REL::Relocation<std::uintptr_t>{ vtableAddr }.write_vfunc(0, &Hook_PlayerControlsPerformInputProcessing);
+            logger::info("Hooked PlayerControls::PerformInputProcessing at vtable {:X}", vtableAddr);
+        }
+
+        if (pc->readyWeaponHandler && !_readyWeaponHooked.exchange(true)) {
+            auto* user = reinterpret_cast<RE::BSInputEventUser*>(pc->readyWeaponHandler);
+            bool isHeldState = false;
+            for (const auto* h : pc->heldStateHandlers) {
+                if (reinterpret_cast<const void*>(h) == reinterpret_cast<const void*>(user)) {
+                    isHeldState = true;
+                    break;
+                }
+            }
+            _readyWeaponIsHeldStateHandler.store(isHeldState, std::memory_order_release);
+
+            const auto vtableAddr = *reinterpret_cast<const std::uintptr_t*>(pc->readyWeaponHandler);
+            const auto origSlot = reinterpret_cast<const std::uintptr_t*>(vtableAddr)[1];
+            _origReadyWeaponShouldHandleEvent.store(origSlot, std::memory_order_release);
+            (void)REL::Relocation<std::uintptr_t>{ vtableAddr }.write_vfunc(1, &Hook_ReadyWeaponShouldHandleEvent);
+            logger::info(
+                "Hooked ReadyWeaponHandler::ShouldHandleEvent at vtable {:X} (heldState={})",
+                vtableAddr,
+                isHeldState);
+        }
+    }
+
+    void Controller::LogSuppressedReadyDiag(
+        const char* a_sourceTag,
+        const char* a_reason,
+        std::string_view a_userEvent,
+        bool a_blockCompReady,
+        bool a_blockOrphanSec,
+        bool a_weaponDrawn,
+        int a_actionResult)
+    {
+        auto& ctrl = GetSingleton();
+        const std::uint32_t count = ctrl._diagReadyBlockLogCount.load(std::memory_order_relaxed);
+        if (count >= 24u) {
+            return;
+        }
+        const std::int64_t nowMs = SteadyNowMs();
+        const bool isActionLog = (a_reason != nullptr && std::string_view(a_reason) == "doAction"sv);
+        auto& rateAtom = isActionLog ? ctrl._diagReadyLastActionLogMs : ctrl._diagReadyLastLogMs;
+        const std::int64_t minIntervalMs = isActionLog ? 100 : 500;
+        const std::int64_t prevMs = rateAtom.load(std::memory_order_relaxed);
+        if (prevMs > 0 && (nowMs - prevMs) < minIntervalMs) {
+            return;
+        }
+        rateAtom.store(nowMs, std::memory_order_relaxed);
+        ctrl._diagReadyBlockLogCount.fetch_add(1, std::memory_order_relaxed);
+        logger::info(
+            "DiagReady[{}] {}: ev='{}' compReady={} orphanSec={} drawn={} res={}",
+            a_sourceTag ? a_sourceTag : "?",
+            a_reason ? a_reason : "?",
+            a_userEvent,
+            a_blockCompReady,
+            a_blockOrphanSec,
+            a_weaponDrawn,
+            a_actionResult);
+    }
+
+    void Controller::ExecuteReadyWeaponAction(SuppressedReadyAction a_action, const char* a_sourceTag)
+    {
+        if (a_action == SuppressedReadyAction::kNone) {
+            return;
+        }
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        auto* pc = RE::PlayerControls::GetSingleton();
+        const bool canCustomReadyAction =
+            (player != nullptr && pc != nullptr && !pc->blockPlayerInput &&
+             pc->readyWeaponHandler != nullptr &&
+             reinterpret_cast<const RE::BSInputEventUser*>(pc->readyWeaponHandler)->inputEventHandlingEnabled);
+        if (!canCustomReadyAction) {
+            return;
+        }
+
+        RE::DEFAULT_OBJECT defAction = RE::DEFAULT_OBJECT::kActionDraw;
+        if (a_action == SuppressedReadyAction::kReload) {
+            defAction = RE::DEFAULT_OBJECT::kActionReload;
+        } else if (a_action == SuppressedReadyAction::kSheath) {
+            defAction = RE::DEFAULT_OBJECT::kActionSheath;
+        }
+        const bool ok = pc->DoAction(defAction, RE::ActionInput::ACTIONPRIORITY::kTry);
+        LogSuppressedReadyDiag(
+            a_sourceTag,
+            "doAction",
+            (a_action == SuppressedReadyAction::kReload) ? "Reload"sv :
+                ((a_action == SuppressedReadyAction::kSheath) ? "Sheath"sv : "Draw"sv),
+            GetSingleton()._suppressCompanionReady.load(std::memory_order_acquire),
+            GetSingleton()._blockOrphanSecondaryActivate.load(std::memory_order_acquire),
+            player->GetWeaponMagicDrawn(),
+            ok ? 1 : 0);
+    }
+
+    SuppressedReadyAction Controller::ProcessInputEventQueue(
+        const RE::InputEvent* a_queueHead,
+        const char* a_sourceTag)
+    {
+        auto* ui = RE::UI::GetSingleton();
+        auto& ctrl = GetSingleton();
+        const bool inMenuMode = (ui && ui->GetMenuModeCount() > 0);
+        const bool blockingWindowOpen = MenuFrameworkUI::IsAnyBlockingWindowOpen();
+        SuppressedReadyAction pendingAction = SuppressedReadyAction::kNone;
+
+        if (inMenuMode) {
+            const bool anyLatchSet =
+                ctrl._suppressedReadyHeld.load(std::memory_order_acquire) ||
+                ctrl._suppressedReadyHolstered.load(std::memory_order_acquire) ||
+                ctrl._customQcTakeLatched.load(std::memory_order_acquire);
+            if (anyLatchSet) {
+                ctrl._inputResetEpoch.fetch_add(1, std::memory_order_acq_rel);
+                ctrl._customQcLastTakePressMs.store(0, std::memory_order_relaxed);
+                ctrl._customQcLastReleaseMs.store(0, std::memory_order_relaxed);
+                ctrl._customQcLatchSetMs.store(0, std::memory_order_relaxed);
+                ctrl._customQcTakeDevice.store(0xFFFFFFFFu, std::memory_order_relaxed);
+                ctrl._customQcTakeIdCode.store(0xFFFFFFFFu, std::memory_order_relaxed);
+                ctrl._suppressedReadyStartMs.store(0, std::memory_order_relaxed);
+                ctrl._suppressedReadyHolstered.store(false, std::memory_order_release);
+                ctrl._suppressedReadyHeld.store(false, std::memory_order_release);
+                ctrl._customQcTakeLatched.store(false, std::memory_order_release);
+                ctrl._inputResetEpoch.fetch_add(1, std::memory_order_acq_rel);
+            }
+            return pendingAction;
+        }
+
+        if (blockingWindowOpen) {
+            // While an ImGui overlay (F1) is open without pausing FO4, process physical key-ups only.
+            if (a_queueHead != nullptr) {
+                const std::uint64_t startEpoch = ctrl._inputResetEpoch.load(std::memory_order_acquire);
+                bool latched = ctrl._customQcTakeLatched.load(std::memory_order_acquire);
+                std::uint32_t boundDev = ctrl._customQcTakeDevice.load(std::memory_order_relaxed);
+                std::uint32_t boundId = ctrl._customQcTakeIdCode.load(std::memory_order_relaxed);
+                std::int64_t lastRelMs = ctrl._customQcLastReleaseMs.load(std::memory_order_relaxed);
+                bool readyHeld = ctrl._suppressedReadyHeld.load(std::memory_order_acquire);
+                bool dirtyTake = false;
+                bool dirtyReady = false;
+
+                for (const auto* ev = a_queueHead; ev; ev = ev->next) {
+                    const auto* btn = ev->As<RE::ButtonEvent>();
+                    if (!btn || btn->QDisabled() || btn->QAnalogValue() != 0.0f) {
+                        continue;
+                    }
+                    const auto& userEvent = btn->QUserEvent();
+                    const auto dev = static_cast<std::uint32_t>(btn->device.get());
+                    const auto idCode = btn->QIDCode();
+                    const bool isTakeFamily =
+                        (userEvent == "QCTakeItem"sv || userEvent == "Activate"sv || userEvent == "SpecialActivate"sv);
+                    if (latched && ((boundDev != 0xFFFFFFFFu && dev == boundDev && idCode == boundId) ||
+                                    (boundDev == 0xFFFFFFFFu && isTakeFamily))) {
+                        latched = false;
+                        boundDev = 0xFFFFFFFFu;
+                        boundId = 0xFFFFFFFFu;
+                        lastRelMs = SteadyNowMs();
+                        dirtyTake = true;
+                    }
+                    if (readyHeld &&
+                        (userEvent == "SecondaryActivate"sv || userEvent == "ReadyWeapon"sv)) {
+                        readyHeld = false;
+                        dirtyReady = true;
+                    }
+                }
+                if ((dirtyTake || dirtyReady) &&
+                    (startEpoch & 1u) == 0u &&
+                    ctrl._inputResetEpoch.load(std::memory_order_acquire) == startEpoch) {
+                    if (dirtyTake) {
+                        ctrl._customQcTakeDevice.store(boundDev, std::memory_order_relaxed);
+                        ctrl._customQcTakeIdCode.store(boundId, std::memory_order_relaxed);
+                        ctrl._customQcLastReleaseMs.store(lastRelMs, std::memory_order_relaxed);
+                        ctrl._customQcTakeLatched.store(latched, std::memory_order_release);
+                    }
+                    if (dirtyReady) {
+                        ctrl._suppressedReadyHolstered.store(false, std::memory_order_release);
+                        ctrl._suppressedReadyHeld.store(false, std::memory_order_release);
+                    }
+                }
+            }
+            return pendingAction;
+        }
+
+        if (!ui || a_queueHead == nullptr) {
+            return pendingAction;
+        }
+
+        const std::int64_t nowMs = SteadyNowMs();
+        const std::uint64_t startEpoch = ctrl._inputResetEpoch.load(std::memory_order_acquire);
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        auto* pc = RE::PlayerControls::GetSingleton();
+        const bool isAlreadyGrabbing = (player && static_cast<bool>(player->grabbedObject));
+        const bool inCommandModeNow = (player && static_cast<bool>(player->actorDoingPlayerCommand));
+        const bool inWorkshopNow = ui->GetMenuOpen("WorkshopMenu"sv);
+        const bool canCustomReadyAction =
+            (player != nullptr && pc != nullptr && !pc->blockPlayerInput &&
+             pc->readyWeaponHandler != nullptr &&
+             reinterpret_cast<const RE::BSInputEventUser*>(pc->readyWeaponHandler)->inputEventHandlingEnabled);
+        const bool blockCompReady = ctrl._suppressCompanionReady.load(std::memory_order_acquire);
+        const bool blockCompActivate = ctrl._suppressCompanionActivate.load(std::memory_order_acquire);
+        const bool blockOrphanSecondary =
+            ctrl._blockOrphanSecondaryActivate.load(std::memory_order_acquire) &&
+            !inCommandModeNow &&
+            !inWorkshopNow;
+        const bool customActive = ctrl._customQcActive.load(std::memory_order_acquire);
+        const bool customTakeEnabled = ctrl._customQcTakeEnabled.load(std::memory_order_acquire);
+        const std::int64_t takeDebounceMs = ctrl._customQcTakeDebounceMs.load(std::memory_order_relaxed);
+
+        bool passHasBlockedSecondary = false;
+        for (const auto* scanEv = a_queueHead; scanEv; scanEv = scanEv->next) {
+            if (scanEv->handled.get() == RE::InputEvent::HANDLED_RESULT::kStop) {
+                continue;
+            }
+            const auto* scanBtn = scanEv->As<RE::ButtonEvent>();
+            if (!scanBtn || scanBtn->QDisabled()) {
+                continue;
+            }
+            if (scanBtn->QUserEvent() == "SecondaryActivate"sv &&
+                (blockCompReady || blockOrphanSecondary)) {
+                passHasBlockedSecondary = true;
+                break;
+            }
+        }
+
+        SuppressedReadyState readyState{};
+        readyState.held = ctrl._suppressedReadyHeld.load(std::memory_order_acquire);
+        readyState.holstered = ctrl._suppressedReadyHolstered.load(std::memory_order_acquire);
+        readyState.startMs = ctrl._suppressedReadyStartMs.load(std::memory_order_relaxed);
+        const bool wasReadyHeldBefore = readyState.held;
+        const bool weaponDrawn = (player != nullptr && player->GetWeaponMagicDrawn());
+        bool handledSuppressedReadyThisPass = false;
+        bool touchedReadyState = false;
+
+        QuickLootTakeLatchState takeLatch{};
+        takeLatch.latched = ctrl._customQcTakeLatched.load(std::memory_order_acquire);
+        takeLatch.boundDevice = ctrl._customQcTakeDevice.load(std::memory_order_relaxed);
+        takeLatch.boundIdCode = ctrl._customQcTakeIdCode.load(std::memory_order_relaxed);
+        takeLatch.hasBoundKey = (takeLatch.boundDevice != 0xFFFFFFFFu);
+        takeLatch.lastTakePressMs = ctrl._customQcLastTakePressMs.load(std::memory_order_relaxed);
+        takeLatch.lastReleaseMs = ctrl._customQcLastReleaseMs.load(std::memory_order_relaxed);
+        takeLatch.latchSetMs = ctrl._customQcLatchSetMs.load(std::memory_order_relaxed);
+        QuickLootTakePassState takePass{};
+        bool touchedTakeLatch = false;
+
+        for (auto* ev = const_cast<RE::InputEvent*>(a_queueHead); ev; ev = ev->next) {
+            if (ev->handled.get() == RE::InputEvent::HANDLED_RESULT::kStop) {
+                continue;
+            }
+            auto* btn = ev->As<RE::ButtonEvent>();
+            if (!btn || btn->QDisabled()) {
+                continue;
+            }
+
+            const auto& userEvent = btn->QUserEvent();
+
+            // 1. Block companion R (SecondaryActivate / ReadyWeapon / QCOpenTransferMenu) and orphan SecondaryActivate
+            if (userEvent == "SecondaryActivate"sv ||
+                userEvent == "ReadyWeapon"sv ||
+                userEvent == "QCOpenTransferMenu"sv) {
+                SuppressedReadyInput readyIn{};
+                readyIn.isSecondaryActivate = (userEvent == "SecondaryActivate"sv);
+                readyIn.isReadyWeapon = (userEvent == "ReadyWeapon"sv);
+                readyIn.isQcTransfer = (userEvent == "QCOpenTransferMenu"sv);
+                readyIn.isJustPressed = btn->QJustPressed();
+                readyIn.isPressed = (btn->QAnalogValue() != 0.0f);
+                readyIn.isReleased = (btn->QAnalogValue() == 0.0f);
+                readyIn.heldDownSecs = btn->QHeldDownSecs();
+                readyIn.blockCompanionReady = blockCompReady;
+                readyIn.blockOrphanSecondary = blockOrphanSecondary;
+                readyIn.passHasBlockedSecondary = passHasBlockedSecondary;
+                readyIn.canCustomReadyAction = canCustomReadyAction;
+                readyIn.weaponDrawn = weaponDrawn;
+                readyIn.alreadyHandledThisPass = handledSuppressedReadyThisPass;
+
+                const auto dec = StepSuppressedSecondaryReady(readyState, readyIn, nowMs);
+                if (dec.consumedPass) {
+                    handledSuppressedReadyThisPass = true;
+                    touchedReadyState = true;
+                }
+                if (!wasReadyHeldBefore && readyState.held && readyIn.isJustPressed) {
+                    LogSuppressedReadyDiag(
+                        a_sourceTag,
+                        "blockedStart",
+                        userEvent,
+                        blockCompReady,
+                        blockOrphanSecondary,
+                        weaponDrawn);
+                }
+                if (dec.action != SuppressedReadyAction::kNone && pendingAction == SuppressedReadyAction::kNone) {
+                    pendingAction = dec.action;
+                }
+                if (dec.swallowEvent) {
+                    SwallowButtonEvent(ev, btn);
+                    continue;
+                }
+            }
+
+            // 2. Block suppressed companion SpecialActivate press/hold (preserving active physics grabs and releases)
+            if (userEvent == "SpecialActivate"sv && blockCompActivate && !isAlreadyGrabbing && btn->QAnalogValue() != 0.0f) {
+                SwallowButtonEvent(ev, btn);
+                continue;
+            }
+
+            // 3. Custom QuickLoot single-item-per-physical-press latch & release-chatter debounce
+            const auto dev = static_cast<std::uint32_t>(btn->device.get());
+            const auto idCode = btn->QIDCode();
+            const bool matchesLatchedPhysicalKey =
+                takeLatch.hasBoundKey && dev == takeLatch.boundDevice && idCode == takeLatch.boundIdCode;
+            const bool isTakeFamily =
+                (userEvent == "QCTakeItem"sv || userEvent == "Activate"sv || userEvent == "SpecialActivate"sv);
+
+            if (isTakeFamily || (matchesLatchedPhysicalKey && btn->QAnalogValue() == 0.0f)) {
+                QuickLootTakeInput takeIn{};
+                takeIn.device = dev;
+                takeIn.idCode = idCode;
+                takeIn.isTakeFamily = isTakeFamily;
+                takeIn.isJustPressed = btn->QJustPressed();
+                takeIn.isPressed = (btn->QAnalogValue() != 0.0f);
+                takeIn.isReleased = (btn->QAnalogValue() == 0.0f);
+                takeIn.canTake = customActive && customTakeEnabled && !isAlreadyGrabbing && (userEvent == "QCTakeItem"sv);
+                takeIn.suppressTakeFamilyPress = customActive && customTakeEnabled && !isAlreadyGrabbing;
+
+                const auto takeDec = StepQuickLootTakeLatch(takeLatch, takePass, takeIn, nowMs, takeDebounceMs);
+                touchedTakeLatch = true;
+                if (takeDec.acceptTake) {
+                    ctrl._customQcTakeRequested.store(true, std::memory_order_release);
+                }
+                if (takeDec.swallowEvent && isTakeFamily) {
+                    SwallowButtonEvent(ev, btn);
+                    continue;
+                }
+            }
+
+            if (userEvent == "QCTakeItem"sv && customActive && customTakeEnabled && !isAlreadyGrabbing) {
+                SwallowButtonEvent(ev, btn);
+                continue;
+            }
+
+            // 4. Prevent accidental corpse/object grab or post-empty activation right after fast looting
+            if (!customActive && (userEvent == "Activate"sv || userEvent == "SpecialActivate"sv)) {
+                const bool isJust = btn->QJustPressed();
+                const bool isHeld = (btn->QAnalogValue() != 0.0f);
+                if (isHeld &&
+                    ShouldBlockPostLootActivate(
+                        nowMs,
+                        ctrl._lastQuickLootTakeMs.load(std::memory_order_acquire),
+                        ctrl._lastQuickLootEmptyMs.load(std::memory_order_acquire),
+                        isJust,
+                        isHeld,
+                        isAlreadyGrabbing)) {
+                    SwallowButtonEvent(ev, btn);
+                    continue;
+                }
+            }
+
+            if (!customActive) {
+                continue;
+            }
+
+            // 5. Custom QuickLoot scroll wheel / D-pad handling
+            if (userEvent == "QuickContainerUp"sv || userEvent == "QuickContainerDown"sv) {
+                const std::int32_t dir = (userEvent == "QuickContainerUp"sv) ? -1 : 1;
+                SwallowButtonEvent(ev, btn);
+                if (btn->QJustPressed()) {
+                    ctrl._customQcPendingScrollDelta.fetch_add(dir, std::memory_order_acq_rel);
+                    ctrl._customQcLastRepeatMs.store(nowMs, std::memory_order_relaxed);
+                } else if (btn->QAnalogValue() != 0.0f && btn->QHeldDownSecs() >= 0.35f) {
+                    const std::int64_t lastRep = ctrl._customQcLastRepeatMs.load(std::memory_order_relaxed);
+                    if ((nowMs - lastRep) >= 80) {
+                        ctrl._customQcPendingScrollDelta.fetch_add(dir, std::memory_order_acq_rel);
+                        ctrl._customQcLastRepeatMs.store(nowMs, std::memory_order_relaxed);
+                    }
+                }
+            }
+        }
+
+        if ((startEpoch & 1u) == 0u &&
+            ctrl._inputResetEpoch.load(std::memory_order_acquire) == startEpoch) {
+            if (touchedReadyState) {
+                ctrl._suppressedReadyStartMs.store(readyState.startMs, std::memory_order_relaxed);
+                ctrl._suppressedReadyHolstered.store(readyState.holstered, std::memory_order_release);
+                ctrl._suppressedReadyHeld.store(readyState.held, std::memory_order_release);
+            }
+            if (touchedTakeLatch) {
+                ctrl._customQcLastTakePressMs.store(takeLatch.lastTakePressMs, std::memory_order_relaxed);
+                ctrl._customQcLastReleaseMs.store(takeLatch.lastReleaseMs, std::memory_order_relaxed);
+                ctrl._customQcLatchSetMs.store(takeLatch.latchSetMs, std::memory_order_relaxed);
+                ctrl._customQcTakeDevice.store(takeLatch.boundDevice, std::memory_order_relaxed);
+                ctrl._customQcTakeIdCode.store(takeLatch.boundIdCode, std::memory_order_relaxed);
+                ctrl._customQcTakeLatched.store(takeLatch.latched, std::memory_order_release);
+            }
+        }
+
+        return pendingAction;
+    }
+
+    void Controller::Hook_MenuControlsPerformInputProcessing(
+        RE::BSInputEventReceiver* a_this,
+        const RE::InputEvent* a_queueHead)
+    {
+        using Fn = void (*)(RE::BSInputEventReceiver*, const RE::InputEvent*);
+        const SuppressedReadyAction pendingAction = ProcessInputEventQueue(a_queueHead, "MC");
+
+        const auto fnAddr = _origMenuControlsPerformInputProcessing.load(std::memory_order_acquire);
+        if (fnAddr) {
+            reinterpret_cast<Fn>(fnAddr)(a_this, a_queueHead);
+        }
+
+        ExecuteReadyWeaponAction(pendingAction, "MC");
+    }
+
+    void Controller::Hook_PlayerControlsPerformInputProcessing(
+        RE::BSInputEventReceiver* a_this,
+        const RE::InputEvent* a_queueHead)
+    {
+        using Fn = void (*)(RE::BSInputEventReceiver*, const RE::InputEvent*);
+        const SuppressedReadyAction pendingAction = ProcessInputEventQueue(a_queueHead, "PC");
+
+        const auto fnAddr = _origPlayerControlsPerformInputProcessing.load(std::memory_order_acquire);
+        if (fnAddr) {
+            reinterpret_cast<Fn>(fnAddr)(a_this, a_queueHead);
+        }
+
+        ExecuteReadyWeaponAction(pendingAction, "PC");
+    }
+
+    void Controller::Hook_UIPerformInputProcessing(
+        RE::BSInputEventReceiver* a_this,
+        const RE::InputEvent* a_queueHead)
+    {
+        using Fn = void (*)(RE::BSInputEventReceiver*, const RE::InputEvent*);
+        const SuppressedReadyAction pendingAction = ProcessInputEventQueue(a_queueHead, "UI");
+
+        const auto fnAddr = _origUIPerformInputProcessing.load(std::memory_order_acquire);
+        if (fnAddr) {
+            reinterpret_cast<Fn>(fnAddr)(a_this, a_queueHead);
+        }
+
+        ExecuteReadyWeaponAction(pendingAction, "UI");
+    }
+
+    void Controller::Hook_HUDDataModelPerformInputProcessing(
+        RE::BSInputEventReceiver* a_this,
+        const RE::InputEvent* a_queueHead)
+    {
+        using Fn = void (*)(RE::BSInputEventReceiver*, const RE::InputEvent*);
+        const SuppressedReadyAction pendingAction = ProcessInputEventQueue(a_queueHead, "HUD");
+
+        const auto fnAddr = _origHUDDataModelPerformInputProcessing.load(std::memory_order_acquire);
+        if (fnAddr) {
+            reinterpret_cast<Fn>(fnAddr)(a_this, a_queueHead);
+        }
+
+        ExecuteReadyWeaponAction(pendingAction, "HUD");
     }
 
     void Controller::EnsureActivateHook()
@@ -2907,8 +4440,72 @@ namespace HUDController
         return _suppressCompanionActivate.load(std::memory_order_acquire);
     }
 
+    bool Controller::Hook_ReadyWeaponShouldHandleEvent(RE::BSInputEventUser* a_this, const RE::InputEvent* a_event)
+    {
+        if (IsEventStoppedOrDisabled(a_event)) {
+            return false;
+        }
+
+        using Fn = bool (*)(RE::BSInputEventUser*, const RE::InputEvent*);
+        const auto fnAddr = _origReadyWeaponShouldHandleEvent.load(std::memory_order_acquire);
+        const bool orig = fnAddr ? reinterpret_cast<Fn>(fnAddr)(a_this, a_event) : false;
+        if (!orig) {
+            return false;
+        }
+
+        auto& ctrl = GetSingleton();
+        if (a_event) {
+            if (const auto* btn = a_event->As<RE::ButtonEvent>()) {
+                const auto& evName = btn->QUserEvent();
+                const bool blockCompReady = ctrl._suppressCompanionReady.load(std::memory_order_acquire);
+                auto* player = RE::PlayerCharacter::GetSingleton();
+                auto* ui = RE::UI::GetSingleton();
+                const bool inCommandModeNow = (player && static_cast<bool>(player->actorDoingPlayerCommand));
+                const bool inWorkshopNow = (ui && ui->GetMenuOpen("WorkshopMenu"sv));
+                const bool blockOrphanSec =
+                    ctrl._blockOrphanSecondaryActivate.load(std::memory_order_acquire) &&
+                    !inCommandModeNow &&
+                    !inWorkshopNow;
+
+                if (evName == "SecondaryActivate"sv && (blockCompReady || blockOrphanSec)) {
+                    LogSuppressedReadyDiag(
+                        "RW",
+                        "shouldHandleBlocked",
+                        evName,
+                        blockCompReady,
+                        blockOrphanSec,
+                        player && player->GetWeaponMagicDrawn());
+                    return false;
+                }
+
+                if (evName == "ReadyWeapon"sv && blockCompReady) {
+                    const bool heldActive =
+                        ctrl._readyWeaponIsHeldStateHandler.load(std::memory_order_acquire) &&
+                        a_this &&
+                        static_cast<const RE::HeldStateHandler*>(a_this)->heldStateActive;
+                    if (!heldActive) {
+                        LogSuppressedReadyDiag(
+                            "RW",
+                            "shouldHandleBlocked",
+                            evName,
+                            blockCompReady,
+                            blockOrphanSec,
+                            player && player->GetWeaponMagicDrawn());
+                        return false;
+                    }
+                }
+            }
+        }
+
+        return true;
+    }
+
     bool Controller::Hook_ActivateShouldHandleEvent(RE::BSInputEventUser* a_this, const RE::InputEvent* a_event)
     {
+        if (IsEventStoppedOrDisabled(a_event)) {
+            return false;
+        }
+
         using Fn = bool (*)(RE::BSInputEventUser*, const RE::InputEvent*);
         const auto fnAddr = _origActivateShouldHandleEvent.load(std::memory_order_acquire);
         const bool orig = fnAddr ? reinterpret_cast<Fn>(fnAddr)(a_this, a_event) : false;
@@ -2917,6 +4514,16 @@ namespace HUDController
         }
 
         auto& ctrl = GetSingleton();
+        if (a_event) {
+            if (const auto* btn = a_event->As<RE::ButtonEvent>()) {
+                if (btn->QUserEvent() == "QCTakeItem"sv &&
+                    ctrl._customQcActive.load(std::memory_order_acquire) &&
+                    ctrl._customQcTakeEnabled.load(std::memory_order_acquire)) {
+                    return false;
+                }
+            }
+        }
+
         if (ctrl._activateIsHeldStateHandler.load(std::memory_order_acquire) && a_this) {
             const auto* held = static_cast<const RE::HeldStateHandler*>(a_this);
             if (held->heldStateActive) {
@@ -2924,8 +4531,56 @@ namespace HUDController
             }
         }
 
+        if (a_event) {
+            if (const auto* btn = a_event->As<RE::ButtonEvent>()) {
+                if (btn->QUserEvent() == "SecondaryActivate"sv) {
+                    const bool blockCompReady = ctrl._suppressCompanionReady.load(std::memory_order_acquire);
+                    auto* player = RE::PlayerCharacter::GetSingleton();
+                    auto* ui = RE::UI::GetSingleton();
+                    const bool inCommandModeNow = (player && static_cast<bool>(player->actorDoingPlayerCommand));
+                    const bool inWorkshopNow = (ui && ui->GetMenuOpen("WorkshopMenu"sv));
+                    const bool blockOrphanSec =
+                        ctrl._blockOrphanSecondaryActivate.load(std::memory_order_acquire) &&
+                        !inCommandModeNow &&
+                        !inWorkshopNow;
+                    if (blockCompReady || blockOrphanSec) {
+                        LogSuppressedReadyDiag(
+                            "ACT",
+                            "shouldHandleBlocked",
+                            btn->QUserEvent(),
+                            blockCompReady,
+                            blockOrphanSec,
+                            player && player->GetWeaponMagicDrawn());
+                        return false;
+                    }
+                }
+            }
+        }
+
         if (ctrl.ShouldBlockCompanionActivation()) {
             return false;
+        }
+
+        if (a_event) {
+            if (const auto* btn = a_event->As<RE::ButtonEvent>()) {
+                const auto& evName = btn->QUserEvent();
+                if (evName == "Activate"sv || evName == "SpecialActivate"sv) {
+                    if (ctrl._customQcTakeLatched.load(std::memory_order_acquire)) {
+                        return false;
+                    }
+                    auto* player = RE::PlayerCharacter::GetSingleton();
+                    const bool isAlreadyGrabbing = (player && static_cast<bool>(player->grabbedObject));
+                    if (ShouldBlockPostLootActivate(
+                            SteadyNowMs(),
+                            ctrl._lastQuickLootTakeMs.load(std::memory_order_acquire),
+                            ctrl._lastQuickLootEmptyMs.load(std::memory_order_acquire),
+                            btn->QJustPressed(),
+                            btn->QAnalogValue() != 0.0f,
+                            isAlreadyGrabbing)) {
+                        return false;
+                    }
+                }
+            }
         }
 
         return true;
@@ -3006,6 +4661,62 @@ namespace HUDController
         }
     }
 
+    void Controller::ResolveGrabDelaySetting()
+    {
+        if (_grabSettingResolved) {
+            return;
+        }
+
+        if (auto* ini = RE::INISettingCollection::GetSingleton()) {
+            if (auto* zDelay = ini->GetSetting("fZKeyDelay:Controls"sv);
+                zDelay && zDelay->GetType() == RE::Setting::SETTING_TYPE::kFloat) {
+                _iniGrabHoldDelay = zDelay;
+                _origGrabHoldDelay = zDelay->GetFloat();
+                _hasOrigGrabHoldDelay = std::isfinite(_origGrabHoldDelay);
+            }
+        }
+
+        if (!_iniGrabHoldDelay) {
+            if (auto* gsc = RE::GameSettingCollection::GetSingleton()) {
+                for (const auto& entry : gsc->settings) {
+                    if (entry.second &&
+                        entry.second->GetType() == RE::Setting::SETTING_TYPE::kFloat &&
+                        entry.second->GetKey() == "fZKeyDelay"sv) {
+                        _iniGrabHoldDelay = entry.second;
+                        _origGrabHoldDelay = entry.second->GetFloat();
+                        _hasOrigGrabHoldDelay = std::isfinite(_origGrabHoldDelay);
+                        break;
+                    }
+                }
+            }
+        }
+
+        _grabSettingResolved = true;
+        logger::info(
+            "Resolved grab hold delay setting: found={} orig={:.2f}",
+            _iniGrabHoldDelay != nullptr,
+            _origGrabHoldDelay);
+    }
+
+    void Controller::ApplyGrabDelaySetting(float a_delaySec)
+    {
+        if (_iniGrabHoldDelay && _hasOrigGrabHoldDelay && std::isfinite(a_delaySec)) {
+            const float clamped = std::clamp(a_delaySec, 0.30f, 2.00f);
+            if (std::fabs(_iniGrabHoldDelay->GetFloat() - clamped) > 0.005f) {
+                _iniGrabHoldDelay->SetFloat(clamped);
+            }
+        }
+    }
+
+    void Controller::RestoreGrabDelaySetting()
+    {
+        if (_iniGrabHoldDelay && _hasOrigGrabHoldDelay) {
+            if (std::fabs(_iniGrabHoldDelay->GetFloat() - _origGrabHoldDelay) > 0.005f) {
+                _iniGrabHoldDelay->SetFloat(_origGrabHoldDelay);
+            }
+        }
+    }
+
     void Controller::EnsurePickRefSink()
     {
         if (_pickSinkRegistered.load(std::memory_order_acquire)) {
@@ -3052,6 +4763,13 @@ namespace HUDController
         _cachedInvSnapshot.items.clear();
         _cachedInvSnapshot.kindByCleanUpper.clear();
         _cachedMerge = {};
+        _customQcActive.store(false, std::memory_order_release);
+        _customQcTakeEnabled.store(false, std::memory_order_release);
+        _customQcPendingScrollDelta.store(0, std::memory_order_release);
+        _customQcTakeRequested.store(false, std::memory_order_release);
+        _customQcOwnerFormID = 0;
+        _customQcSelectedIndex = 0;
+        _customQcSortedItems.clear();
         _qcHoverItemHash.store(0, std::memory_order_relaxed);
         _qcHoverFirstSeenMs.store(0, std::memory_order_relaxed);
     }
@@ -3065,6 +4783,18 @@ namespace HUDController
     {
         if (_pendingReset.exchange(false, std::memory_order_acq_rel)) {
             _pendingQcInvalidate.store(false, std::memory_order_release);
+            _inputResetEpoch.fetch_add(1, std::memory_order_acq_rel);
+            _customQcLastTakePressMs.store(0, std::memory_order_relaxed);
+            _customQcLastReleaseMs.store(0, std::memory_order_relaxed);
+            _customQcLatchSetMs.store(0, std::memory_order_relaxed);
+            _customQcTakeDevice.store(0xFFFFFFFFu, std::memory_order_relaxed);
+            _customQcTakeIdCode.store(0xFFFFFFFFu, std::memory_order_relaxed);
+            _suppressedReadyStartMs.store(0, std::memory_order_relaxed);
+            _suppressedReadyHolstered.store(false, std::memory_order_release);
+            _suppressedReadyHeld.store(false, std::memory_order_release);
+            _customQcTakeLatched.store(false, std::memory_order_release);
+            _blockOrphanSecondaryActivate.store(false, std::memory_order_release);
+            _inputResetEpoch.fetch_add(1, std::memory_order_acq_rel);
             _state.Reset();
             _qcState.Reset();
             _cachedTargetFormID = 0;
@@ -3076,6 +4806,7 @@ namespace HUDController
             _cachedAnchorRefScale = 0;
             _lastQuickLootActiveMs = 0;
             RestoreCompanionEngineSettings();
+            RestoreGrabDelaySetting();
             InvalidateQuickContainerCacheInternal();
             return;
         }
@@ -3087,6 +4818,15 @@ namespace HUDController
     void Controller::ClearOverlaySnapshot()
     {
         _suppressCompanionActivate.store(false, std::memory_order_release);
+        _suppressCompanionReady.store(false, std::memory_order_release);
+        _blockOrphanSecondaryActivate.store(false, std::memory_order_release);
+        _suppressedReadyStartMs.store(0, std::memory_order_relaxed);
+        _suppressedReadyHolstered.store(false, std::memory_order_release);
+        _suppressedReadyHeld.store(false, std::memory_order_release);
+        _customQcActive.store(false, std::memory_order_release);
+        _customQcTakeEnabled.store(false, std::memory_order_release);
+        _customQcPendingScrollDelta.store(0, std::memory_order_release);
+        _customQcTakeRequested.store(false, std::memory_order_release);
         _hoverTargetKey.store(0, std::memory_order_relaxed);
         _hoverFirstSeenMs.store(0, std::memory_order_relaxed);
         _qcHoverItemHash.store(0, std::memory_order_relaxed);
@@ -3105,7 +4845,15 @@ namespace HUDController
     void Controller::ResetState()
     {
         _pendingReset.store(true, std::memory_order_release);
+        _inputResetEpoch.fetch_add(1, std::memory_order_acq_rel);
+        _customQcLastTakePressMs.store(0, std::memory_order_relaxed);
+        _customQcLastReleaseMs.store(0, std::memory_order_relaxed);
+        _customQcLatchSetMs.store(0, std::memory_order_relaxed);
+        _customQcTakeDevice.store(0xFFFFFFFFu, std::memory_order_relaxed);
+        _customQcTakeIdCode.store(0xFFFFFFFFu, std::memory_order_relaxed);
+        _customQcTakeLatched.store(false, std::memory_order_release);
         ClearOverlaySnapshot();
+        _inputResetEpoch.fetch_add(1, std::memory_order_acq_rel);
     }
 
     bool Controller::ResolveQuickContainerSelectedItemMeta(
@@ -3134,7 +4882,9 @@ namespace HUDController
             return true;
         }
 
-        const int earlyExitScore = (a_item.stackSignature != 0) ? 390 : 350;
+        const int earlyExitScore =
+            ((a_item.baseFormID != 0) ? 100 : 0) +
+            ((a_item.stackSignature != 0) ? 390 : 350);
         const std::string targetCleanUpper = CleanUpperKey(a_item.name);
         RE::TESBoundObject* bestObj = nullptr;
         RE::BSTSmartPointer<RE::ExtraDataList> bestExtra;
@@ -3196,6 +4946,9 @@ namespace HUDController
                         bool stackLeg = false;
                         const std::uint64_t stackSig = ComputeStackSignature(stackExtra, stackIdx, stackLeg);
                         const bool stackFav = (stackExtra && stackExtra->HasType(RE::EXTRA_DATA_TYPE::kFavorite));
+                        if (a_item.baseFormID != 0 && invItem.object->GetFormID() == a_item.baseFormID) {
+                            score += 100;
+                        }
                         if (stack->GetCount() == a_item.count) {
                             score += 20;
                         }
@@ -3279,6 +5032,7 @@ namespace HUDController
         nextSnap.generation = _cachedInvSnapshot.generation + 1;
 
         {
+            auto* favMgr = RE::FavoritesManager::GetSingleton();
             RE::BSAutoWriteLock lock{ a_invOwner->inventoryList->rwLock };
             const std::size_t liveListSize = a_invOwner->inventoryList->data.size();
             std::size_t liveStackCount = 0;
@@ -3342,6 +5096,10 @@ namespace HUDController
                     nextSnap.kindByCleanUpper.try_emplace(cleanBaseKey, kind);
                 }
 
+                const std::uint32_t baseFormID = invItem.object->GetFormID();
+                const bool taggedForSearch = IsObjectTaggedForSearch(invItem.object, favMgr);
+                const bool isCaps = (baseFormID == 0x0000000Fu);
+
                 std::vector<QuickContainerItemEntry> itemStacks;
                 std::uint32_t stackIdx = 0;
                 for (auto* stack = invItem.stackData.get(); stack; stack = stack->nextStack.get(), ++stackIdx) {
@@ -3353,12 +5111,17 @@ namespace HUDController
                     if (a_skipEquipped && equipped) {
                         continue;
                     }
+                    if (stack->flags.all(RE::BGSInventoryItem::Stack::Flag::kEquipStateLocked)) {
+                        continue;
+                    }
 
                     RE::ExtraDataList* stackExtra = stack->extra.get();
                     const RE::TBO_InstanceData* instData = ResolveItemInstanceData(invItem.object, stackExtra);
                     if (!invItem.object->GetPlayable(instData)) {
                         continue;
                     }
+
+                    const QuickLootCategory qcCategory = ClassifyQuickLootCategory(invItem.object, instData);
 
                     const bool favorite = (stackExtra && stackExtra->HasType(RE::EXTRA_DATA_TYPE::kFavorite));
                     const bool allowInstancedFullName =
@@ -3384,6 +5147,8 @@ namespace HUDController
 
                     bool legendary = false;
                     const std::uint64_t stackSig = ComputeStackSignature(stackExtra, stackIdx, legendary);
+                    const bool questItem = IsStackQuestObject(stackExtra);
+                    const bool isTempStack = stack->flags.all(RE::BGSInventoryItem::Stack::Flag::kTemporary);
 
                     const std::int32_t rawValue = RE::TESValueForm::GetFormValue(invItem.object, instData);
                     const std::uint32_t itemValue = (rawValue > 0) ? static_cast<std::uint32_t>(rawValue) : 0u;
@@ -3395,11 +5160,17 @@ namespace HUDController
                     entry.count = cnt;
                     entry.isLegendary = legendary;
                     entry.isFavorite = favorite;
+                    entry.isTaggedForSearch = taggedForSearch;
                     entry.isEquipped = equipped;
                     entry.itemKind = kind;
                     entry.stackSignature = stackSig;
                     entry.value = itemValue;
                     entry.weight = itemWeight;
+                    entry.baseFormID = baseFormID;
+                    entry.quickLootCategory = qcCategory;
+                    entry.isQuestItem = questItem;
+                    entry.isCaps = isCaps;
+                    entry.isTemporary = isTempStack;
                     itemStacks.push_back(std::move(entry));
                 }
 
@@ -3417,6 +5188,213 @@ namespace HUDController
 
         _cachedInvSnapshot = std::move(nextSnap);
         return _cachedInvSnapshot;
+    }
+
+    bool Controller::ExecuteCustomQuickLootTake(
+        RE::TESObjectREFR* a_invOwner,
+        RE::PlayerCharacter* a_player,
+        RE::QuickContainerMode a_mode,
+        const QuickContainerItemEntry& a_target)
+    {
+        if (!a_invOwner || !a_invOwner->inventoryList || !a_player || a_target.name.empty()) {
+            return false;
+        }
+
+        const std::string targetCleanUpper = CleanUpperKey(a_target.name);
+        RE::TESBoundObject* boundObj = nullptr;
+        std::uint32_t boundFormID = 0;
+        RE::NiPointer<RE::TESObjectREFR> droppedRef;
+        RE::ObjectRefHandle droppedOrigHandle{};
+        std::vector<std::uint32_t> stackIndices;
+        std::uint64_t totalCount = 0;
+
+        {
+            RE::BSAutoWriteLock lock{ a_invOwner->inventoryList->rwLock };
+
+            for (const auto& invItem : a_invOwner->inventoryList->data) {
+                if (!invItem.object || invItem.object->IsDeleted()) {
+                    continue;
+                }
+                const std::uint32_t itemFormID = invItem.object->GetFormID();
+                if (a_target.baseFormID != 0 && itemFormID != a_target.baseFormID) {
+                    continue;
+                }
+
+                const std::string_view baseSv = RE::TESFullName::GetFullName(*invItem.object);
+                const std::string baseName = baseSv.empty() ? std::string{} : std::string(baseSv);
+                const bool hasBaseName = !TrimWhitespace(baseName).empty();
+                const auto objFormType = invItem.object->GetFormType();
+                const bool allowInstancedFullName =
+                    (objFormType == RE::ENUM_FORM_ID::kWEAP || objFormType == RE::ENUM_FORM_ID::kARMO);
+
+                std::vector<std::uint32_t> candidateIndices;
+                std::uint64_t candidateTotal = 0;
+                RE::NiPointer<RE::TESObjectREFR> candidateDroppedRef;
+                RE::ObjectRefHandle candidateDroppedOrigHandle{};
+
+                std::uint32_t stackIdx = 0;
+                for (auto* stack = invItem.stackData.get(); stack; stack = stack->nextStack.get(), ++stackIdx) {
+                    const std::uint32_t cnt = stack->GetCount();
+                    if (cnt == 0) {
+                        continue;
+                    }
+                    const bool equipped = stack->IsEquipped();
+                    if (equipped != a_target.isEquipped) {
+                        continue;
+                    }
+                    if (stack->flags.all(RE::BGSInventoryItem::Stack::Flag::kEquipStateLocked)) {
+                        continue;
+                    }
+                    const bool isTempStack = stack->flags.all(RE::BGSInventoryItem::Stack::Flag::kTemporary);
+                    if (isTempStack != a_target.isTemporary) {
+                        continue;
+                    }
+
+                    RE::ExtraDataList* stackExtra = stack->extra.get();
+                    const RE::TBO_InstanceData* instData = ResolveItemInstanceData(invItem.object, stackExtra);
+                    if (!invItem.object->GetPlayable(instData)) {
+                        continue;
+                    }
+
+                    const bool favorite = (stackExtra && stackExtra->HasType(RE::EXTRA_DATA_TYPE::kFavorite));
+                    if (favorite != a_target.isFavorite) {
+                        continue;
+                    }
+                    const bool questItem = IsStackQuestObject(stackExtra);
+                    if (questItem != a_target.isQuestItem) {
+                        continue;
+                    }
+
+                    bool legendary = false;
+                    const std::uint64_t stackSig = ComputeStackSignature(stackExtra, stackIdx, legendary);
+                    if (legendary != a_target.isLegendary || stackSig != a_target.stackSignature) {
+                        continue;
+                    }
+
+                    std::string displayName;
+                    if (!ResolveInventoryStackDisplayName(
+                            const_cast<RE::BGSInventoryItem&>(invItem),
+                            stackIdx,
+                            stackExtra,
+                            baseName,
+                            hasBaseName,
+                            allowInstancedFullName,
+                            displayName)) {
+                        continue;
+                    }
+
+                    const bool nameMatches =
+                        (displayName == a_target.name) ||
+                        (!targetCleanUpper.empty() && CleanUpperKey(displayName) == targetCleanUpper);
+                    if (!nameMatches) {
+                        continue;
+                    }
+
+                    if (isTempStack) {
+                        if (stackExtra) {
+                            if (auto* refHandles = stackExtra->GetByType<RE::ExtraReferenceHandles>();
+                                refHandles && refHandles->originalRef) {
+                                auto refPtr = refHandles->originalRef.get();
+                                if (refPtr && !refPtr->IsDeleted()) {
+                                    candidateDroppedRef = std::move(refPtr);
+                                    candidateDroppedOrigHandle = refHandles->originalRef;
+                                    candidateTotal = cnt;
+                                    candidateIndices.clear();
+                                    candidateIndices.push_back(stackIdx);
+                                    break;
+                                }
+                            }
+                        }
+                        continue; // Never materialize stale/orphaned kTemporary proxy stack into player inventory
+                    }
+
+                    candidateIndices.push_back(stackIdx);
+                    candidateTotal += cnt;
+                }
+
+                if (!candidateIndices.empty() && candidateTotal > 0) {
+                    boundObj = invItem.object;
+                    boundFormID = itemFormID;
+                    stackIndices = std::move(candidateIndices);
+                    totalCount = candidateTotal;
+                    droppedRef = std::move(candidateDroppedRef);
+                    droppedOrigHandle = candidateDroppedOrigHandle;
+                    break;
+                }
+            }
+        }
+
+        if (!boundObj || totalCount == 0) {
+            return false;
+        }
+
+        const std::int32_t takeCount = static_cast<std::int32_t>(std::min<std::uint64_t>(
+            totalCount,
+            static_cast<std::uint64_t>(std::numeric_limits<std::int32_t>::max())));
+
+        if (droppedRef) {
+            a_player->PickUpObject(droppedRef.get(), takeCount, true);
+
+            bool foundResidualTemp = false;
+            std::uint32_t cleanupIdx = 0;
+            std::uint32_t cleanupCount = 0;
+            if (a_invOwner->inventoryList) {
+                RE::BSAutoWriteLock lock{ a_invOwner->inventoryList->rwLock };
+                for (const auto& invItem : a_invOwner->inventoryList->data) {
+                    if (!invItem.object || invItem.object->IsDeleted() ||
+                        invItem.object->GetFormID() != boundFormID) {
+                        continue;
+                    }
+                    std::uint32_t stackIdx = 0;
+                    for (auto* stack = invItem.stackData.get(); stack; stack = stack->nextStack.get(), ++stackIdx) {
+                        if (stack->GetCount() == 0 ||
+                            !stack->flags.all(RE::BGSInventoryItem::Stack::Flag::kTemporary)) {
+                            continue;
+                        }
+                        if (auto* stackExtra = stack->extra.get()) {
+                            if (auto* refHandles = stackExtra->GetByType<RE::ExtraReferenceHandles>();
+                                refHandles && refHandles->originalRef == droppedOrigHandle) {
+                                foundResidualTemp = true;
+                                cleanupIdx = stackIdx;
+                                cleanupCount = stack->GetCount();
+                                break;
+                            }
+                        }
+                    }
+                    if (foundResidualTemp) {
+                        break;
+                    }
+                }
+            }
+
+            if (foundResidualTemp && cleanupCount > 0) {
+                const std::int32_t rmCount = static_cast<std::int32_t>(std::min<std::uint32_t>(
+                    cleanupCount,
+                    static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max())));
+                RE::TESObjectREFR::RemoveItemData cleanupData(boundObj, rmCount);
+                cleanupData.stackData.push_back(cleanupIdx);
+                cleanupData.a_otherContainer = nullptr;
+                cleanupData.reason = RE::ITEM_REMOVE_REASON::kNone;
+                (void)a_invOwner->RemoveItem(cleanupData);
+            }
+            return true;
+        }
+
+        if (stackIndices.empty()) {
+            return false;
+        }
+
+        RE::TESObjectREFR::RemoveItemData data(boundObj, takeCount);
+        for (const std::uint32_t idx : stackIndices) {
+            data.stackData.push_back(idx);
+        }
+        data.a_otherContainer = a_player;
+        data.reason = (a_mode == RE::QuickContainerMode::kTeammate)
+            ? RE::ITEM_REMOVE_REASON::kStoreTeammate
+            : RE::ITEM_REMOVE_REASON::kStoreContainer;
+        (void)a_invOwner->RemoveItem(data);
+        a_player->PlayPickUpSound(boundObj, true, false);
+        return true;
     }
 
     const QuickContainerMergeResult& Controller::ResolveMergedQuickContainerWindow(
@@ -3560,6 +5538,11 @@ namespace HUDController
             ResetState();
             if (a_event.opening) {
                 EnsurePickRefSink();
+                EnsureActivateHook();
+                EnsureMenuControlsHook();
+                EnsurePlayerControlsHooks();
+                EnsureUIInputHook();
+                EnsureHUDDataModelHook();
                 if (auto* ui = RE::UI::GetSingleton()) {
                     if (auto hudMenu = ui->GetMenu("HUDMenu"sv)) {
                         TryHookHUDMenu(hudMenu.get());
@@ -3622,11 +5605,19 @@ namespace HUDController
         if (!a_hudMenu || !a_hudMenu->uiMovie || !a_hudMenu->uiMovie->GetVisible()) {
             _lastQuickLootActiveMs = 0;
             RestoreCompanionEngineSettings();
+            RestoreGrabDelaySetting();
             ClearOverlaySnapshot();
             return false;
         }
 
         const ConfigData cfg = Config::GetSingleton().GetSnapshot();
+        _customQcTakeDebounceMs.store(static_cast<std::int64_t>(cfg.qcTakeDebounceMs), std::memory_order_relaxed);
+        if (cfg.enabled) {
+            ResolveGrabDelaySetting();
+            ApplyGrabDelaySetting(cfg.grabHoldDelay);
+        } else {
+            RestoreGrabDelaySetting();
+        }
         const bool hudOverlayActive = MenuFrameworkUI::IsHudOverlayActive();
         const bool modernRolloverActive = (cfg.promptStyle == 1 && hudOverlayActive);
         const bool modernQcActive = (modernRolloverActive && cfg.modernQuickContainer);
@@ -3637,6 +5628,7 @@ namespace HUDController
         if (!LocateHUDClips(*a_hudMenu, movie, ignoreQcAlpha, clips)) {
             _lastQuickLootActiveMs = 0;
             RestoreCompanionEngineSettings();
+            RestoreGrabDelaySetting();
             ClearOverlaySnapshot();
             return false;
         }
@@ -3680,6 +5672,9 @@ namespace HUDController
         CompanionFilterDecision companionDecision{};
         if (cfg.limitCompanionPromptDistance && player) {
             EnsureActivateHook();
+            EnsureMenuControlsHook();
+            EnsurePlayerControlsHooks();
+            EnsureHUDDataModelHook();
             ResolveCompanionEngineSettings();
 
             auto* targetActor = targetRef ? targetRef->As<RE::Actor>() : nullptr;
@@ -3751,9 +5746,12 @@ namespace HUDController
             RestoreCompanionEngineSettings();
         }
 
-        _suppressCompanionActivate.store(companionDecision.suppressTarget, std::memory_order_release);
+        const bool blockHiddenComp = companionDecision.suppressTarget && cfg.blockHiddenCompanionInteractions;
+        _suppressCompanionActivate.store(blockHiddenComp, std::memory_order_release);
+        _suppressCompanionReady.store(blockHiddenComp, std::memory_order_release);
 
         bool changed = false;
+        bool rolloverFloatingVisible = false;
         OverlaySnapshot nextOverlay{};
 
         // 1. Rollover prompt controller + metadata publishing
@@ -3792,7 +5790,7 @@ namespace HUDController
                 changed = true;
             }
 
-            const bool rolloverFloatingVisible =
+            rolloverFloatingVisible =
                 (!companionDecision.suppressTarget &&
                  out.action == HUDAction::kApplyFloat && in.projectedTarget.visible &&
                  !clips.quickContainerVisible && targetRef && stageW > 0.0f && stageH > 0.0f);
@@ -3892,6 +5890,20 @@ namespace HUDController
                 if (nextOverlay.target.rawDisplayName.empty() && !nextOverlay.target.displayName.empty()) {
                     nextOverlay.target.rawDisplayName = nextOverlay.target.displayName;
                 }
+
+                bool rolloverCrime = (targetRef && !targetRef->IsDeleted() && targetRef->IsCrimeToActivate());
+                if (!rolloverCrime && IsCrimeActionVerb(nextOverlay.actionVerb)) {
+                    rolloverCrime = true;
+                }
+                if (!rolloverCrime) {
+                    for (const auto& act : nextOverlay.actions) {
+                        if (IsCrimeActionVerb(act.label)) {
+                            rolloverCrime = true;
+                            break;
+                        }
+                    }
+                }
+                nextOverlay.isCrime = rolloverCrime;
             }
         }
 
@@ -3907,6 +5919,7 @@ namespace HUDController
             qcIn.smoothingSpeed = cfg.quickContainerSmoothing;
             qcIn.deadzonePx = cfg.quickContainerDeadzone;
             qcIn.hideNativeClip = modernQcActive;
+            qcIn.suppressTarget = companionDecision.suppressTarget;
             qcIn.deltaSeconds = a_timeDelta;
             ReadClipBaseTransform(clips.quickContainer, qcIn);
 
@@ -3947,7 +5960,7 @@ namespace HUDController
             }
             if (ApplyTransformToClip(movie, clips.qcParent, clips.quickContainer, qcApplyOut)) {
                 changed = true;
-            } else if (modernQcActive && clips.quickContainerRawVisible &&
+            } else if ((modernQcActive || companionDecision.suppressTarget) && clips.quickContainerRawVisible &&
                        qcOut.action == HUDAction::kNoOp && _qcState.IsHidingAlpha()) {
                 clips.quickContainer.SetMember("alpha"sv, RE::Scaleform::GFx::Value(0.0));
                 changed = true;
@@ -3958,8 +5971,8 @@ namespace HUDController
             const bool publishGraceQc =
                 (qcOut.action == HUDAction::kNoOp && _qcState.IsHidingAlpha() && _qcState.HasLastScreen());
 
-            if (modernQcActive && clips.quickContainerVisible && (publishFloatQc || publishGraceQc) &&
-                stageW > 0.0f && stageH > 0.0f) {
+            if (modernQcActive && clips.quickContainerVisible && !companionDecision.suppressTarget &&
+                (publishFloatQc || publishGraceQc) && stageW > 0.0f && stageH > 0.0f) {
                 EngineQuickContainerSnapshot engineSnap;
                 if (hasPreEngineQc) {
                     engineSnap = std::move(preEngineQc);
@@ -3984,11 +5997,19 @@ namespace HUDController
                 RE::TESObjectREFR* invOwner = invPtr ? invPtr.get() : (contPtr ? contPtr.get() : targetRef);
                 const std::uint32_t ownerFormID = invOwner ? invOwner->GetFormID() : 0u;
 
-                const bool isWorkbench =
-                    (targetMeta.itemKind == TargetInfo::ItemKind::Furniture) ||
-                    (engineSnap.valid &&
-                     (engineSnap.mode == RE::QuickContainerMode::kCrafting ||
-                      engineSnap.mode == RE::QuickContainerMode::kWorkshop));
+                const bool isPowerArmorMode =
+                    engineSnap.valid &&
+                    (engineSnap.mode == RE::QuickContainerMode::kPowerArmor ||
+                     engineSnap.mode == RE::QuickContainerMode::kStealingPowerArmor);
+                const bool isCraftingOrWorkshopMode =
+                    engineSnap.valid &&
+                    (engineSnap.mode == RE::QuickContainerMode::kCrafting ||
+                     engineSnap.mode == RE::QuickContainerMode::kWorkshop);
+                const bool isWorkbench = IsQuickContainerWorkbenchTarget(
+                    targetMeta.itemKind,
+                    engineSnap.valid,
+                    isPowerArmorMode,
+                    isCraftingOrWorkshopMode);
                 const bool isLockedOrEmpty =
                     engineSnap.valid &&
                     (engineSnap.isLocked || engineSnap.items.empty());
@@ -4011,35 +6032,175 @@ namespace HUDController
                     !anyEngineEquipped;
 
                 static const CachedInventorySnapshot kEmptyInvSnap{};
+                const bool targetIsCrime =
+                    (targetRef && !targetRef->IsDeleted() && targetRef->IsCrimeToActivate());
+                const bool modeEligibleForCustom =
+                    engineSnap.valid &&
+                    (engineSnap.mode == RE::QuickContainerMode::kLoot ||
+                     engineSnap.mode == RE::QuickContainerMode::kTurret ||
+                     engineSnap.mode == RE::QuickContainerMode::kTeammate ||
+                     engineSnap.mode == RE::QuickContainerMode::kPowerArmor);
+                const bool wantCustomQuickLoot =
+                    modernQcActive &&
+                    cfg.qcSortMode != 6 &&
+                    modeEligibleForCustom &&
+                    !targetIsCrime &&
+                    !isWorkbench &&
+                    !isLockedOrEmpty &&
+                    invOwner != nullptr;
+
                 const bool shouldCollectInv =
                     !isWorkbench &&
                     !isLockedOrEmpty &&
                     invOwner != nullptr &&
-                    (cfg.qcShowItemIcons ||
+                    (wantCustomQuickLoot ||
+                     cfg.qcShowItemIcons ||
                      (cfg.qcExpandInventoryList &&
                       (!engineSnap.valid || engineHasEllipsis || engineSnap.items.size() >= 5)));
-                const auto& invSnap = shouldCollectInv
-                    ? CollectQuickContainerInventory(invOwner, skipEquipped)
-                    : kEmptyInvSnap;
+                const CachedInventorySnapshot* invSnapPtr = shouldCollectInv
+                    ? &CollectQuickContainerInventory(invOwner, skipEquipped)
+                    : &kEmptyInvSnap;
 
-                ReadQuickContainerData(
-                    *this,
-                    ownerFormID,
-                    clips.quickContainer,
-                    targetMeta.displayName,
-                    engineSnap,
-                    invSnap,
-                    cfg.qcMaxVisibleRows,
-                    cfg.qcExpandInventoryList,
-                    _lastQcSelectedIndex,
-                    nextOverlay.quickContainer);
-                _lastQcSelectedIndex = nextOverlay.quickContainer.selectedIndex;
+                if (wantCustomQuickLoot && !invSnapPtr->truncatedByCap && !invSnapPtr->items.empty()) {
+                    if (ownerFormID == 0 || ownerFormID != _customQcOwnerFormID) {
+                        _customQcOwnerFormID = ownerFormID;
+                        _customQcSelectedIndex = 0;
+                        (void)_customQcPendingScrollDelta.exchange(0, std::memory_order_acq_rel);
+                        (void)_customQcTakeRequested.exchange(false, std::memory_order_acq_rel);
+                    }
+
+                    const auto sortCfg = QuickLootSortConfig::FromConfig(cfg);
+                    _customQcSortedItems = invSnapPtr->items;
+                    SortQuickContainerItems(_customQcSortedItems, sortCfg);
+
+                    const std::int32_t scrollDelta =
+                        _customQcPendingScrollDelta.exchange(0, std::memory_order_acq_rel);
+                    _customQcSelectedIndex = StepCustomQuickLootSelection(
+                        _customQcSelectedIndex,
+                        scrollDelta,
+                        static_cast<std::int32_t>(_customQcSortedItems.size()));
+
+                    if (_customQcTakeRequested.exchange(false, std::memory_order_acq_rel) &&
+                        player &&
+                        engineSnap.buttonAEnabled &&
+                        !targetIsCrime &&
+                        engineSnap.mode != RE::QuickContainerMode::kPowerArmor &&
+                        engineSnap.mode != RE::QuickContainerMode::kStealingPowerArmor &&
+                        !_customQcSortedItems.empty()) {
+                        const QuickContainerItemEntry targetEntry =
+                            _customQcSortedItems[static_cast<std::size_t>(_customQcSelectedIndex)];
+                        if (ExecuteCustomQuickLootTake(invOwner, player, engineSnap.mode, targetEntry)) {
+                            const std::int64_t takenAtMs = SteadyNowMs();
+                            _lastQuickLootTakeMs.store(takenAtMs, std::memory_order_release);
+                            _cachedInvSnapshot.ownerFormID = 0;
+                            _cachedInvSnapshot.timestampMs = 0;
+                            invSnapPtr = &CollectQuickContainerInventory(invOwner, skipEquipped);
+                            _customQcSortedItems = invSnapPtr->items;
+                            SortQuickContainerItems(_customQcSortedItems, sortCfg);
+                            _customQcSelectedIndex = StepCustomQuickLootSelection(
+                                _customQcSelectedIndex,
+                                0,
+                                static_cast<std::int32_t>(_customQcSortedItems.size()));
+                            if (_customQcSortedItems.empty()) {
+                                _lastQuickLootEmptyMs.store(takenAtMs, std::memory_order_release);
+                            }
+                        }
+                    }
+
+                    ReadQuickContainerHeader(
+                        clips.quickContainer,
+                        targetMeta.displayName,
+                        engineSnap,
+                        nextOverlay.quickContainer);
+                    ReadQuickContainerButtons(
+                        clips.quickContainer,
+                        engineSnap,
+                        nextOverlay.quickContainer);
+
+                    const int totalCount = static_cast<int>(_customQcSortedItems.size());
+                    if (totalCount > 0) {
+                        const int maxRows = cfg.qcExpandInventoryList
+                            ? std::clamp(cfg.qcMaxVisibleRows, 3, 12)
+                            : 5;
+                        const auto win = OverlayLayout::ComputeListWindow(
+                            totalCount,
+                            _customQcSelectedIndex,
+                            maxRows);
+                        _customQcSelectedIndex = win.clampedSelected;
+                        nextOverlay.quickContainer.totalItemCount = totalCount;
+                        nextOverlay.quickContainer.windowStartIndex = win.start;
+                        nextOverlay.quickContainer.selectedIndex = win.clampedSelected;
+                        nextOverlay.quickContainer.hasMoreAbove = (win.start > 0);
+                        nextOverlay.quickContainer.hasMoreBelow = (win.end < totalCount);
+                        nextOverlay.quickContainer.hasExactTotal = true;
+                        nextOverlay.quickContainer.items.reserve(
+                            static_cast<std::size_t>(std::max(0, win.end - win.start)));
+                        for (int i = win.start; i < win.end; ++i) {
+                            nextOverlay.quickContainer.items.push_back(
+                                _customQcSortedItems[static_cast<std::size_t>(i)]);
+                        }
+                        _customQcTakeEnabled.store(
+                            engineSnap.buttonAEnabled &&
+                            !targetIsCrime &&
+                            engineSnap.mode != RE::QuickContainerMode::kPowerArmor &&
+                            engineSnap.mode != RE::QuickContainerMode::kStealingPowerArmor,
+                            std::memory_order_release);
+                        _customQcActive.store(true, std::memory_order_release);
+                    } else {
+                        _customQcActive.store(false, std::memory_order_release);
+                        _customQcTakeEnabled.store(false, std::memory_order_release);
+                        _customQcSelectedIndex = 0;
+                        nextOverlay.quickContainer.totalItemCount = 0;
+                        nextOverlay.quickContainer.windowStartIndex = 0;
+                        nextOverlay.quickContainer.selectedIndex = 0;
+                        nextOverlay.quickContainer.hasMoreAbove = false;
+                        nextOverlay.quickContainer.hasMoreBelow = false;
+                        nextOverlay.quickContainer.hasExactTotal = true;
+                    }
+                    _lastQcSelectedIndex = nextOverlay.quickContainer.selectedIndex;
+                } else {
+                    _customQcActive.store(false, std::memory_order_release);
+                    _customQcTakeEnabled.store(false, std::memory_order_release);
+                    _customQcPendingScrollDelta.store(0, std::memory_order_release);
+                    _customQcTakeRequested.store(false, std::memory_order_release);
+                    _customQcOwnerFormID = 0;
+
+                    ReadQuickContainerData(
+                        *this,
+                        ownerFormID,
+                        clips.quickContainer,
+                        targetMeta.displayName,
+                        engineSnap,
+                        *invSnapPtr,
+                        cfg.qcMaxVisibleRows,
+                        cfg.qcExpandInventoryList,
+                        _lastQcSelectedIndex,
+                        nextOverlay.quickContainer);
+                    _lastQcSelectedIndex = nextOverlay.quickContainer.selectedIndex;
+                }
 
                 const float screenX = publishFloatQc ? qcOut.x : _qcState.LastScreen().x;
                 const float screenY = publishFloatQc ? qcOut.y : _qcState.LastScreen().y;
                 nextOverlay.quickContainer.active = true;
                 nextOverlay.quickContainer.docked = !cfg.floatQuickContainer;
                 nextOverlay.quickContainer.isWorkbench = isWorkbench;
+
+                bool qcCrime =
+                    engineSnap.valid &&
+                    (engineSnap.mode == RE::QuickContainerMode::kStealing ||
+                     engineSnap.mode == RE::QuickContainerMode::kStealingPowerArmor);
+                if (!qcCrime && targetRef && !targetRef->IsDeleted()) {
+                    qcCrime = targetRef->IsCrimeToActivate();
+                }
+                if (!qcCrime) {
+                    for (const auto& btn : nextOverlay.quickContainer.buttons) {
+                        if (IsCrimeActionVerb(btn.label)) {
+                            qcCrime = true;
+                            break;
+                        }
+                    }
+                }
+                nextOverlay.quickContainer.isCrime = qcCrime;
                 nextOverlay.quickContainer.normScreenX = cfg.floatQuickContainer
                     ? std::clamp((screenX - visRect.x1) / stageW, 0.0f, 1.0f)
                     : 0.54f;
@@ -4086,11 +6247,32 @@ namespace HUDController
                 nextOverlay.quickContainerVisible = true;
                 nextOverlay.updateTimeMs = SteadyNowMs();
             } else {
-                InvalidateQuickContainerCache();
+                InvalidateQuickContainerCacheInternal();
             }
         } else {
-            InvalidateQuickContainerCache();
+            InvalidateQuickContainerCacheInternal();
         }
+
+        const bool inCommandMode = (player && static_cast<bool>(player->actorDoingPlayerCommand));
+        bool inWorkshopMenu = false;
+        if (auto* ui = RE::UI::GetSingleton()) {
+            inWorkshopMenu = ui->GetMenuOpen("WorkshopMenu"sv);
+        }
+        const bool effectiveModernRollover = modernRolloverActive && cfg.enabled && !bypassActive;
+        const bool anyRolloverPromptVisible =
+            !companionDecision.suppressTarget &&
+            (effectiveModernRollover ? rolloverFloatingVisible : (clips.hasRollover && clips.rolloverRawVisible));
+        const bool anyPromptVisible =
+            anyRolloverPromptVisible || (clips.quickContainerVisible && !companionDecision.suppressTarget);
+        const bool blockOrphanSecondary =
+            cfg.enabled &&
+            !bypassActive &&
+            cfg.limitCompanionPromptDistance &&
+            cfg.blockHiddenCompanionInteractions &&
+            !inCommandMode &&
+            !inWorkshopMenu &&
+            !anyPromptVisible;
+        _blockOrphanSecondaryActivate.store(blockOrphanSecondary, std::memory_order_release);
 
         {
             std::lock_guard lock{ _overlayMutex };

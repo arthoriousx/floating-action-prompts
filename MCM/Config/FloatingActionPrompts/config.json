@@ -72,6 +72,21 @@
           "text": "Prevent Companion Loot Focus Steal (Requires Limit)",
           "help": "Requires Limit Companion Prompt Distance. Eliminates the wide companion pick radius and stops nearby companions from stealing crosshair focus while looting containers.",
           "valueOptions": { "sourceType": "ModSettingBool" }
+        },
+        {
+          "type": "switcher",
+          "id": "bBlockHiddenCompanionInteractions:General",
+          "text": "Block Hidden Companion Interactions (E / R)",
+          "help": "When a companion's prompt is hidden by distance or combat rules, also block E (Talk) and R (Trade / Transfer) so R works normally to reload or draw/holster your weapon.",
+          "valueOptions": { "sourceType": "ModSettingBool" }
+        },
+        { "type": "section", "text": "Interaction & Grab" },
+        {
+          "type": "slider",
+          "id": "fGrabHoldDelay:General",
+          "text": "Hold Time to Grab Objects / Corpses (sec)",
+          "help": "How long E / Activate must be held before picking up / dragging physical objects and corpses (vanilla is ~0.30s). Higher values prevent accidentally grabbing bodies while tapping E to loot.",
+          "valueOptions": { "min": 0.30, "max": 2.0, "step": 0.05, "sourceType": "ModSettingFloat" }
         }
       ]
     },
@@ -309,6 +324,13 @@
           "text": "Modern Element Spacing",
           "help": "Horizontal spacing between button badge, icon, and text.",
           "valueOptions": { "min": 2.0, "max": 24.0, "step": 1.0, "sourceType": "ModSettingFloat" }
+        },
+        {
+          "type": "switcher",
+          "id": "bHighlightCrimePrompts:Visual",
+          "text": "Highlight Crime / Steal Prompts",
+          "help": "Tint Steal / Pickpocket / Trespass prompt text and stealing QuickLoot headers/buttons with the configured crime color.",
+          "valueOptions": { "sourceType": "ModSettingBool" }
         },
         { "type": "section", "text": "Inline Info Summary" },
         {
@@ -569,6 +591,75 @@
           "text": "Show Item Category Icons",
           "help": "Display category icons next to loot items inside the Modern QuickLoot list.",
           "valueOptions": { "sourceType": "ModSettingBool" }
+        },
+        { "type": "section", "text": "QuickLoot Sorting & Priority (Drag & Drop Category Order in F1 Menu)" },
+        {
+          "type": "stepper",
+          "id": "iQcSortMode:QuickContainer",
+          "text": "Sort Mode",
+          "help": "Choose how FAP sorts Modern QuickLoot items. Vanilla uses passive mirroring; all other modes enable FAP custom sorting for Loot, Turrets, Companions, and Power Armor.",
+          "valueOptions": {
+            "sourceType": "ModSettingInt",
+            "options": [
+              "Category Priority (Custom)",
+              "Value (High -> Low)",
+              "Value / Weight (High -> Low)",
+              "Alphabetical (A -> Z)",
+              "Weight (Low -> High)",
+              "Weight (High -> Low)",
+              "Vanilla (Passive Mirror)"
+            ]
+          }
+        },
+        {
+          "type": "stepper",
+          "id": "iQcCategorySecondarySort:QuickContainer",
+          "text": "Within Category Sort",
+          "help": "Secondary sort order within each category when Sort Mode is set to Category Priority.",
+          "valueOptions": {
+            "sourceType": "ModSettingInt",
+            "options": [
+              "Value (High -> Low)",
+              "Value / Weight (High -> Low)",
+              "Alphabetical (A -> Z)",
+              "Weight (Low -> High)"
+            ]
+          }
+        },
+        {
+          "type": "switcher",
+          "id": "bQcPinQuestItems:QuickContainer",
+          "text": "Pin Quest Items at Top",
+          "help": "Always keep quest items pinned at the top of the Custom QuickLoot list.",
+          "valueOptions": { "sourceType": "ModSettingBool" }
+        },
+        {
+          "type": "switcher",
+          "id": "bQcPinLegendary:QuickContainer",
+          "text": "Pin Legendary Items at Top",
+          "help": "Keep legendary weapons and armor pinned above normal items.",
+          "valueOptions": { "sourceType": "ModSettingBool" }
+        },
+        {
+          "type": "switcher",
+          "id": "bQcPinTaggedForSearch:QuickContainer",
+          "text": "Pin Tagged for Search at Top",
+          "help": "Keep junk items containing components tagged for search pinned near the top.",
+          "valueOptions": { "sourceType": "ModSettingBool" }
+        },
+        {
+          "type": "switcher",
+          "id": "bQcPinCaps:QuickContainer",
+          "text": "Pin Bottlecaps at Top",
+          "help": "Keep Bottlecaps pinned above regular loot items.",
+          "valueOptions": { "sourceType": "ModSettingBool" }
+        },
+        {
+          "type": "slider",
+          "id": "iQcTakeDebounceMs:QuickContainer",
+          "text": "Take Key Anti-Bounce (ms)",
+          "help": "Minimum quiet time (ms) after releasing E before another Custom QuickLoot item can be taken. Prevents mechanical keyboard release-chatter double looting (0 = off, default 0).",
+          "valueOptions": { "min": 0, "max": 300, "step": 10, "sourceType": "ModSettingInt" }
         }
       ]
     }

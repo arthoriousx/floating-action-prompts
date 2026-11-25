@@ -1,6 +1,7 @@
 #include "Config.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
@@ -10,6 +11,63 @@
 
 namespace
 {
+    constexpr std::array<const char*, kQuickLootCategoryCount> kQuickLootCategoryKeys = {
+        "Key",
+        "Medicine",
+        "Chem",
+        "Drink",
+        "Food",
+        "Ammo",
+        "Explosive",
+        "Pistol",
+        "Rifle",
+        "HeavyWeapon",
+        "Melee",
+        "PowerArmor",
+        "Armor",
+        "Clothing",
+        "Mod",
+        "BookNote",
+        "Holotape",
+        "Misc",
+        "Junk"
+    };
+
+    constexpr std::array<const char*, kQuickLootCategoryCount> kQuickLootCategoryLabels = {
+        "Keys",
+        "Aid: Medicine",
+        "Aid: Chems",
+        "Aid: Drinks",
+        "Aid: Food",
+        "Ammo",
+        "Weapons: Explosives",
+        "Weapons: Pistols",
+        "Weapons: Rifles & Shotguns",
+        "Weapons: Heavy",
+        "Weapons: Melee",
+        "Armor: Power Armor",
+        "Armor: Pieces",
+        "Armor: Clothing",
+        "Mods",
+        "Books & Notes",
+        "Holotapes",
+        "Misc",
+        "Junk"
+    };
+
+    [[nodiscard]] bool EqualsIgnoreCaseAscii(std::string_view a_lhs, std::string_view a_rhs) noexcept
+    {
+        if (a_lhs.size() != a_rhs.size()) {
+            return false;
+        }
+        for (std::size_t i = 0; i < a_lhs.size(); ++i) {
+            if (std::tolower(static_cast<unsigned char>(a_lhs[i])) !=
+                std::tolower(static_cast<unsigned char>(a_rhs[i]))) {
+                return false;
+            }
+        }
+        return true;
+    }
     std::string Trim(const std::string& str)
     {
         const auto first = str.find_first_not_of(" \t\r\n");
@@ -104,6 +162,7 @@ namespace
         ClampFinite(a_data.edgeMargin, 0.0f, 400.0f, defaults.edgeMargin);
         ClampFinite(a_data.companionMaxDistance, 50.0f, 500.0f, defaults.companionMaxDistance);
         ClampFinite(a_data.companionCombatMaxDistance, 0.0f, 500.0f, defaults.companionCombatMaxDistance);
+        ClampFinite(a_data.grabHoldDelay, 0.30f, 2.00f, defaults.grabHoldDelay);
 
         ClampOffset(a_data.doorOffset, defaults.doorOffset);
         ClampOffset(a_data.npcOffset, defaults.npcOffset);
@@ -139,6 +198,7 @@ namespace
         a_data.modernNameColor &= 0x00FFFFFFu;
         a_data.modernIconColor &= 0x00FFFFFFu;
         a_data.modernAccentColor &= 0x00FFFFFFu;
+        a_data.crimeTextColor &= 0x00FFFFFFu;
         a_data.promptFont = SanitizeFontSetting(a_data.promptFont);
 
         a_data.infoCardPosition = std::clamp(a_data.infoCardPosition, 0, 6);
@@ -171,6 +231,10 @@ namespace
         ClampFinite(a_data.qcKeyTextScale, 0.40f, 1.20f, defaults.qcKeyTextScale);
         ClampFinite(a_data.qcButtonTextScale, 0.5f, 2.5f, defaults.qcButtonTextScale);
         a_data.qcFont = SanitizeFontSetting(a_data.qcFont);
+        a_data.qcSortMode = std::clamp(a_data.qcSortMode, 0, 6);
+        a_data.qcCategorySecondarySort = std::clamp(a_data.qcCategorySecondarySort, 0, 3);
+        a_data.qcTakeDebounceMs = std::clamp(a_data.qcTakeDebounceMs, 0, 300);
+        SanitizeQuickLootCategoryOrder(a_data.qcCategoryOrder);
     }
 
     bool ParseFileInto(const std::filesystem::path& a_path, ConfigData& a_target)
@@ -217,6 +281,8 @@ namespace
                     else if (key == "fCompanionMaxDistance") a_target.companionMaxDistance = std::stof(valStr);
                     else if (key == "fCompanionCombatMaxDistance") a_target.companionCombatMaxDistance = std::stof(valStr);
                     else if (key == "bCompanionDeprioritizeLoot") a_target.companionDeprioritizeLoot = ParseBool(valStr);
+                    else if (key == "bBlockHiddenCompanionInteractions") a_target.blockHiddenCompanionInteractions = ParseBool(valStr);
+                    else if (key == "fGrabHoldDelay") a_target.grabHoldDelay = std::stof(valStr);
                 } else if (currentSection == "Offsets") {
                     if (key == "fDoorOffsetX") a_target.doorOffset.x = std::stof(valStr);
                     else if (key == "fDoorOffsetY") a_target.doorOffset.y = std::stof(valStr);
@@ -280,6 +346,8 @@ namespace
                     else if (key == "uModernNameColor") a_target.modernNameColor = ParseColorHex(valStr);
                     else if (key == "uModernIconColor") a_target.modernIconColor = ParseColorHex(valStr);
                     else if (key == "uModernAccentColor") a_target.modernAccentColor = ParseColorHex(valStr);
+                    else if (key == "bHighlightCrimePrompts") a_target.highlightCrimePrompts = ParseBool(valStr);
+                    else if (key == "uCrimeTextColor") a_target.crimeTextColor = ParseColorHex(valStr);
                 } else if (currentSection == "InfoCard") {
                     if (key == "iInfoCardPosition") a_target.infoCardPosition = std::stoi(valStr);
                     else if (key == "fInfoCardOffsetX") a_target.infoCardOffsetX = std::stof(valStr);
@@ -326,6 +394,14 @@ namespace
                     else if (key == "fQcButtonTextScale") a_target.qcButtonTextScale = std::stof(valStr);
                     else if (key == "bQcShowItemIcons") a_target.qcShowItemIcons = ParseBool(valStr);
                     else if (key == "sQcFont") a_target.qcFont = SanitizeFontSetting(valStr);
+                    else if (key == "iQcSortMode") a_target.qcSortMode = std::stoi(valStr);
+                    else if (key == "iQcCategorySecondarySort") a_target.qcCategorySecondarySort = std::stoi(valStr);
+                    else if (key == "bQcPinQuestItems") a_target.qcPinQuestItems = ParseBool(valStr);
+                    else if (key == "bQcPinLegendary") a_target.qcPinLegendary = ParseBool(valStr);
+                    else if (key == "bQcPinTaggedForSearch") a_target.qcPinTaggedForSearch = ParseBool(valStr);
+                    else if (key == "bQcPinCaps") a_target.qcPinCaps = ParseBool(valStr);
+                    else if (key == "iQcTakeDebounceMs") a_target.qcTakeDebounceMs = std::stoi(valStr);
+                    else if (key == "sQcCategoryOrder") a_target.qcCategoryOrder = ParseQuickLootCategoryOrder(valStr);
                 }
             } catch (...) {
                 // Ignore malformed numeric values
@@ -357,7 +433,9 @@ namespace
         file << "bLimitCompanionPromptDistance=" << (a_data.limitCompanionPromptDistance ? 1 : 0) << "\n";
         file << "fCompanionMaxDistance=" << a_data.companionMaxDistance << "\n";
         file << "fCompanionCombatMaxDistance=" << a_data.companionCombatMaxDistance << "\n";
-        file << "bCompanionDeprioritizeLoot=" << (a_data.companionDeprioritizeLoot ? 1 : 0) << "\n\n";
+        file << "bCompanionDeprioritizeLoot=" << (a_data.companionDeprioritizeLoot ? 1 : 0) << "\n";
+        file << "bBlockHiddenCompanionInteractions=" << (a_data.blockHiddenCompanionInteractions ? 1 : 0) << "\n";
+        file << "fGrabHoldDelay=" << a_data.grabHoldDelay << "\n\n";
 
         file << "[Offsets]\n";
         file << "fDoorOffsetX=" << a_data.doorOffset.x << "\n";
@@ -422,7 +500,9 @@ namespace
         file << "uModernTextColor=" << FormatColorHex(a_data.modernTextColor) << "\n";
         file << "uModernNameColor=" << FormatColorHex(a_data.modernNameColor) << "\n";
         file << "uModernIconColor=" << FormatColorHex(a_data.modernIconColor) << "\n";
-        file << "uModernAccentColor=" << FormatColorHex(a_data.modernAccentColor) << "\n\n";
+        file << "uModernAccentColor=" << FormatColorHex(a_data.modernAccentColor) << "\n";
+        file << "bHighlightCrimePrompts=" << (a_data.highlightCrimePrompts ? 1 : 0) << "\n";
+        file << "uCrimeTextColor=" << FormatColorHex(a_data.crimeTextColor) << "\n\n";
 
         file << "[InfoCard]\n";
         file << "iInfoCardPosition=" << a_data.infoCardPosition << "\n";
@@ -471,9 +551,174 @@ namespace
         file << "fQcButtonTextScale=" << a_data.qcButtonTextScale << "\n";
         file << "bQcShowItemIcons=" << (a_data.qcShowItemIcons ? 1 : 0) << "\n";
         file << "sQcFont=" << a_data.qcFont << "\n";
+        file << "iQcSortMode=" << a_data.qcSortMode << "\n";
+        file << "iQcCategorySecondarySort=" << a_data.qcCategorySecondarySort << "\n";
+        file << "bQcPinQuestItems=" << (a_data.qcPinQuestItems ? 1 : 0) << "\n";
+        file << "bQcPinLegendary=" << (a_data.qcPinLegendary ? 1 : 0) << "\n";
+        file << "bQcPinTaggedForSearch=" << (a_data.qcPinTaggedForSearch ? 1 : 0) << "\n";
+        file << "bQcPinCaps=" << (a_data.qcPinCaps ? 1 : 0) << "\n";
+        file << "iQcTakeDebounceMs=" << a_data.qcTakeDebounceMs << "\n";
+        file << "sQcCategoryOrder=" << FormatQuickLootCategoryOrder(a_data.qcCategoryOrder) << "\n";
 
         return file.good();
     }
+}
+
+const char* GetQuickLootCategoryKey(int a_catIndex) noexcept
+{
+    if (a_catIndex < 0 || a_catIndex >= static_cast<int>(kQuickLootCategoryCount)) {
+        return "Misc";
+    }
+    return kQuickLootCategoryKeys[static_cast<std::size_t>(a_catIndex)];
+}
+
+const char* GetQuickLootCategoryLabel(int a_catIndex) noexcept
+{
+    if (a_catIndex < 0 || a_catIndex >= static_cast<int>(kQuickLootCategoryCount)) {
+        return "Misc";
+    }
+    return kQuickLootCategoryLabels[static_cast<std::size_t>(a_catIndex)];
+}
+
+std::array<int, kQuickLootCategoryCount> DefaultQuickLootCategoryOrder() noexcept
+{
+    return { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18 };
+}
+
+void SanitizeQuickLootCategoryOrder(std::array<int, kQuickLootCategoryCount>& a_order) noexcept
+{
+    std::array<bool, kQuickLootCategoryCount> seen{};
+    std::array<int, kQuickLootCategoryCount> cleaned{};
+    std::size_t outIdx = 0;
+
+    for (const int cat : a_order) {
+        if (cat >= 0 && cat < static_cast<int>(kQuickLootCategoryCount) &&
+            !seen[static_cast<std::size_t>(cat)]) {
+            seen[static_cast<std::size_t>(cat)] = true;
+            cleaned[outIdx++] = cat;
+        }
+    }
+
+    for (int cat = 0; cat < static_cast<int>(kQuickLootCategoryCount); ++cat) {
+        if (!seen[static_cast<std::size_t>(cat)]) {
+            cleaned[outIdx++] = cat;
+        }
+    }
+
+    a_order = cleaned;
+}
+
+std::array<int, kQuickLootCategoryCount> ParseQuickLootCategoryOrder(std::string_view a_csv) noexcept
+{
+    std::array<int, kQuickLootCategoryCount> parsed{};
+    parsed.fill(-1);
+    std::array<bool, kQuickLootCategoryCount> seen{};
+    std::size_t outIdx = 0;
+
+    auto trimToken = [](std::string_view a_tok) noexcept -> std::string_view {
+        const std::size_t first = a_tok.find_first_not_of(" \t\r\n");
+        if (first == std::string_view::npos) {
+            return {};
+        }
+        const std::size_t last = a_tok.find_last_not_of(" \t\r\n");
+        return a_tok.substr(first, last - first + 1);
+    };
+
+    bool hasExplicitArmorSub = false;
+    for (std::size_t pos = 0; pos <= a_csv.size();) {
+        const std::size_t comma = a_csv.find(',', pos);
+        const std::string_view token = trimToken(
+            (comma == std::string_view::npos) ? a_csv.substr(pos) : a_csv.substr(pos, comma - pos));
+        if (EqualsIgnoreCaseAscii(token, "PowerArmor") || EqualsIgnoreCaseAscii(token, "Clothing")) {
+            hasExplicitArmorSub = true;
+            break;
+        }
+        if (comma == std::string_view::npos) {
+            break;
+        }
+        pos = comma + 1;
+    }
+
+    auto pushCat = [&](int a_cat) noexcept {
+        if (outIdx < kQuickLootCategoryCount &&
+            a_cat >= 0 &&
+            a_cat < static_cast<int>(kQuickLootCategoryCount) &&
+            !seen[static_cast<std::size_t>(a_cat)]) {
+            seen[static_cast<std::size_t>(a_cat)] = true;
+            parsed[outIdx++] = a_cat;
+        }
+    };
+
+    std::size_t pos = 0;
+    while (pos <= a_csv.size() && outIdx < kQuickLootCategoryCount) {
+        const std::size_t comma = a_csv.find(',', pos);
+        const std::string_view token = trimToken(
+            (comma == std::string_view::npos) ? a_csv.substr(pos) : a_csv.substr(pos, comma - pos));
+
+        if (!token.empty()) {
+            if (EqualsIgnoreCaseAscii(token, "Aid")) {
+                pushCat(static_cast<int>(QuickLootCategory::Medicine));
+                pushCat(static_cast<int>(QuickLootCategory::Chem));
+                pushCat(static_cast<int>(QuickLootCategory::Drink));
+                pushCat(static_cast<int>(QuickLootCategory::Food));
+            } else if (EqualsIgnoreCaseAscii(token, "Weapon")) {
+                pushCat(static_cast<int>(QuickLootCategory::Explosive));
+                pushCat(static_cast<int>(QuickLootCategory::Pistol));
+                pushCat(static_cast<int>(QuickLootCategory::Rifle));
+                pushCat(static_cast<int>(QuickLootCategory::HeavyWeapon));
+                pushCat(static_cast<int>(QuickLootCategory::Melee));
+            } else if (!hasExplicitArmorSub && EqualsIgnoreCaseAscii(token, "Armor")) {
+                pushCat(static_cast<int>(QuickLootCategory::PowerArmor));
+                pushCat(static_cast<int>(QuickLootCategory::Armor));
+                pushCat(static_cast<int>(QuickLootCategory::Clothing));
+            } else {
+                int matchedCat = -1;
+                for (int c = 0; c < static_cast<int>(kQuickLootCategoryCount); ++c) {
+                    if (EqualsIgnoreCaseAscii(token, kQuickLootCategoryKeys[static_cast<std::size_t>(c)])) {
+                        matchedCat = c;
+                        break;
+                    }
+                }
+                if (matchedCat < 0 && (token.size() == 1 || token.size() == 2)) {
+                    bool allDigits = true;
+                    int val = 0;
+                    for (const char ch : token) {
+                        if (ch < '0' || ch > '9') {
+                            allDigits = false;
+                            break;
+                        }
+                        val = val * 10 + (ch - '0');
+                    }
+                    if (allDigits && val >= 0 && val < static_cast<int>(kQuickLootCategoryCount)) {
+                        matchedCat = val;
+                    }
+                }
+                pushCat(matchedCat);
+            }
+        }
+
+        if (comma == std::string_view::npos) {
+            break;
+        }
+        pos = comma + 1;
+    }
+
+    SanitizeQuickLootCategoryOrder(parsed);
+    return parsed;
+}
+
+std::string FormatQuickLootCategoryOrder(const std::array<int, kQuickLootCategoryCount>& a_order)
+{
+    auto clean = a_order;
+    SanitizeQuickLootCategoryOrder(clean);
+    std::string out;
+    for (std::size_t i = 0; i < kQuickLootCategoryCount; ++i) {
+        if (i > 0) {
+            out.push_back(',');
+        }
+        out.append(GetQuickLootCategoryKey(clean[i]));
+    }
+    return out;
 }
 
 ConfigData Config::GetSnapshot() const
