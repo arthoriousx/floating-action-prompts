@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "TargetInfo.h"
 
@@ -79,6 +80,31 @@ namespace OverlayLayout
     [[nodiscard]] bool IsCategoryIconEnabled(
         TargetInfo::ItemKind a_kind,
         const ConfigData& a_cfg) noexcept;
+
+    struct HoldRingSegment
+    {
+        float x1{ 0.0f };
+        float y1{ 0.0f };
+        float x2{ 0.0f };
+        float y2{ 0.0f };
+    };
+
+    void BuildRoundedRectProgressSegments(
+        float a_minX,
+        float a_minY,
+        float a_maxX,
+        float a_maxY,
+        float a_radius,
+        float a_progress,
+        std::vector<HoldRingSegment>& a_out) noexcept;
+
+    void BuildCircleProgressSegments(
+        float a_cx,
+        float a_cy,
+        float a_radius,
+        float a_progress,
+        int a_totalSegments,
+        std::vector<HoldRingSegment>& a_out) noexcept;
 
     [[nodiscard]] std::string TruncateUtf8Prefix(
         std::string_view a_text,

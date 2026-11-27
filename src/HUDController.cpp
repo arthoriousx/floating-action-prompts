@@ -94,6 +94,690 @@ namespace HUDController
                eqIgnoreCase(trimmed, "TRESPASS");
     }
 
+    namespace
+    {
+        [[nodiscard]] bool VerbMatchesToken(std::string_view a_verb, std::string_view a_token) noexcept
+        {
+            if (a_token.empty() || a_verb.empty()) {
+                return false;
+            }
+            const auto first = a_verb.find_first_not_of(" \t\r\n");
+            if (first == std::string_view::npos) {
+                return false;
+            }
+            const auto last = a_verb.find_last_not_of(" \t\r\n");
+            const std::string_view v = a_verb.substr(first, last - first + 1);
+            if (v.size() < a_token.size()) {
+                return false;
+            }
+            for (std::size_t i = 0; i < a_token.size(); ++i) {
+                if (ToUpperAsciiChar(v[i]) != ToUpperAsciiChar(a_token[i])) {
+                    return false;
+                }
+            }
+            return v.size() == a_token.size() ||
+                   v[a_token.size()] == ' ' ||
+                   v[a_token.size()] == ':' ||
+                   v[a_token.size()] == '(' ||
+                   v[a_token.size()] == '-';
+        }
+    }
+
+    bool IsRangedNpcActionVerb(std::string_view a_verb) noexcept
+    {
+        static constexpr std::array<std::string_view, 11> kRangedVerbs{
+            "INTIMIDAT",
+            "PACIF",
+            "INCITE",
+            "COMMAND",
+            "OVERTURE",
+            "HOLDUP",
+            "HOLD UP",
+            "SURRENDER",
+            "THREATEN",
+            "HACK",
+            "ROBB"
+        };
+        if (VerbMatchesToken(a_verb, "ROB")) {
+            return true;
+        }
+        for (const auto kw : kRangedVerbs) {
+            if (ContainsAsciiCaseInsensitive(a_verb, kw)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool IsCloseRangeNpcActionVerb(std::string_view a_verb) noexcept
+    {
+        static constexpr std::array<std::string_view, 13> kCloseVerbs{
+            "TALK",
+            "PICKPOCKET",
+            "STEAL",
+            "TRADE",
+            "BARTER",
+            "SEARCH",
+            "LOOT",
+            "HEAL",
+            "STIMPAK",
+            "REVIVE",
+            "CANNIBAL",
+            "FEED",
+            "SANDMAN"
+        };
+        for (const auto kw : kCloseVerbs) {
+            if (ContainsAsciiCaseInsensitive(a_verb, kw)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool ShouldSuppressForAiming(
+        int a_aimingMode,
+        bool a_isAiming,
+        bool a_isNpcTarget,
+        bool a_isQuickContainer) noexcept
+    {
+        if (!a_isAiming) {
+            return false;
+        }
+        if (a_aimingMode == 2) {
+            return true;
+        }
+        if (a_aimingMode == 1) {
+            return a_isNpcTarget && !a_isQuickContainer;
+        }
+        return false;
+    }
+
+    bool IsAimingWithCooldown(
+        bool a_rawAiming,
+        std::int64_t a_nowMs,
+        std::int64_t& a_lastAimingMs,
+        std::int64_t a_cooldownMs) noexcept
+    {
+        if (a_rawAiming) {
+            a_lastAimingMs = a_nowMs;
+            return true;
+        }
+        if (a_cooldownMs > 0 &&
+            a_lastAimingMs > 0 &&
+            a_nowMs >= a_lastAimingMs &&
+            (a_nowMs - a_lastAimingMs) < a_cooldownMs) {
+            return true;
+        }
+        return false;
+    }
+
+    Vector3 ComputeWaterPromptAnchor(
+        const Vector3& a_playerPos,
+        float a_playerYawRad,
+        const Vector3& a_camPos,
+        const Vector3& a_camForward,
+        float a_waterZ,
+        float a_maxHorizDist) noexcept
+    {
+        const float horizMax = std::clamp(
+            std::isfinite(a_maxHorizDist) ? a_maxHorizDist : 105.0f,
+            45.0f,
+            160.0f);
+        const float fwdX = std::sin(a_playerYawRad);
+        const float fwdY = std::cos(a_playerYawRad);
+
+        float offsetX = fwdX * std::min(72.0f, horizMax);
+        float offsetY = fwdY * std::min(72.0f, horizMax);
+
+        if (std::isfinite(a_camForward.x) &&
+            std::isfinite(a_camForward.y) &&
+            std::isfinite(a_camForward.z) &&
+            a_camForward.z < -0.08f) {
+            const float t = (a_waterZ - a_camPos.z) / a_camForward.z;
+            if (std::isfinite(t) && t > 10.0f && t < 500.0f) {
+                const float hx = (a_camPos.x + a_camForward.x * t) - a_playerPos.x;
+                const float hy = (a_camPos.y + a_camForward.y * t) - a_playerPos.y;
+                const float hLen = std::hypot(hx, hy);
+                if (std::isfinite(hLen) && hLen > 1.0f) {
+                    const float clampedDist = std::clamp(hLen, 35.0f, horizMax);
+                    offsetX = (hx / hLen) * clampedDist;
+                    offsetY = (hy / hLen) * clampedDist;
+                }
+            }
+        }
+
+        return {
+            a_playerPos.x + offsetX,
+            a_playerPos.y + offsetY,
+            a_waterZ + 12.0f
+        };
+    }
+
+    bool FilterNpcPromptActions(
+        std::vector<ButtonHintEntry>& a_actions,
+        bool a_isNonCompanionLiveNpc,
+        float a_distance,
+        bool a_limitEnabled,
+        float a_maxDistance,
+        bool a_keepRangedActions,
+        float a_rangedMaxDistance) noexcept
+    {
+        if (!a_isNonCompanionLiveNpc || !a_limitEnabled) {
+            return false;
+        }
+        const float maxDist = (std::isfinite(a_maxDistance) && a_maxDistance >= 0.0f)
+            ? a_maxDistance
+            : 185.0f;
+        if (std::isfinite(a_distance) && a_distance <= maxDist) {
+            return false;
+        }
+        if (!a_keepRangedActions) {
+            a_actions.clear();
+            return true;
+        }
+        const float rangedLimit = (std::isfinite(a_rangedMaxDistance) && a_rangedMaxDistance > 0.0f)
+            ? std::max(maxDist, a_rangedMaxDistance)
+            : 0.0f;
+        if (rangedLimit > 0.0f && (!std::isfinite(a_distance) || a_distance > rangedLimit)) {
+            a_actions.clear();
+            return true;
+        }
+        a_actions.erase(
+            std::remove_if(a_actions.begin(), a_actions.end(),
+                [](const ButtonHintEntry& e) noexcept {
+                    return !IsRangedNpcActionVerb(e.label);
+                }),
+            a_actions.end());
+        return a_actions.empty();
+    }
+
+    bool StepFeaturedExamineGuard(
+        bool& a_waitInitialRelease,
+        const FeaturedExamineInput& a_in) noexcept
+    {
+        if (!a_in.isFeaturedExamineOpen || !a_in.isDismissEvent) {
+            return false;
+        }
+        const std::int64_t graceMs = std::clamp<std::int64_t>(a_in.graceMs, 0, 5000);
+        if (graceMs <= 0) {
+            a_waitInitialRelease = false;
+            return false;
+        }
+        const std::int64_t ageMs = (a_in.openTimeMs > 0 && a_in.nowMs >= a_in.openTimeMs)
+            ? (a_in.nowMs - a_in.openTimeMs)
+            : 0;
+
+        if (a_in.isReleased || !a_in.isPressed) {
+            if (a_waitInitialRelease) {
+                a_waitInitialRelease = false;
+                return true;
+            }
+            if (graceMs > 0 && a_in.openTimeMs > 0 && ageMs < graceMs) {
+                return true;
+            }
+            return false;
+        }
+
+        if (a_waitInitialRelease) {
+            const std::int64_t recoverMs = std::max<std::int64_t>(graceMs, 150);
+            if (a_in.isJustPressed && a_in.openTimeMs > 0 && ageMs >= recoverMs) {
+                a_waitInitialRelease = false;
+                return false;
+            }
+            return true;
+        }
+
+        if (graceMs > 0 && a_in.openTimeMs > 0 && ageMs < graceMs) {
+            return true;
+        }
+        return false;
+    }
+
+    float ScoreThirdPersonCandidate(
+        const ThirdPersonAssistCandidate& a_cand,
+        float a_maxDist,
+        float a_minCosHalfAngle) noexcept
+    {
+        if (!std::isfinite(a_cand.dist) || !std::isfinite(a_cand.forwardDot) ||
+            !std::isfinite(a_maxDist) || a_maxDist <= 1.0f ||
+            a_cand.dist < 0.0f || a_cand.dist > a_maxDist) {
+            return -1.0f;
+        }
+        if (a_cand.forwardDot < a_minCosHalfAngle) {
+            return -1.0f;
+        }
+
+        const float distScore = 1.0f - std::clamp(a_cand.dist / a_maxDist, 0.0f, 1.0f);
+        const float angleRange = std::max(0.05f, 1.0f - a_minCosHalfAngle);
+        const float angleScore = std::clamp((a_cand.forwardDot - a_minCosHalfAngle) / angleRange, 0.0f, 1.0f);
+
+        float score = 0.0f;
+        if (a_cand.hasCrosshairDot && std::isfinite(a_cand.crosshairDot)) {
+            const float crosshairScore = std::clamp((a_cand.crosshairDot - 0.15f) / 0.85f, 0.0f, 1.0f);
+            score = crosshairScore * 0.52f + distScore * 0.30f + angleScore * 0.18f;
+            if (a_cand.isLooseItem) {
+                score += 0.10f;
+            }
+        } else {
+            score = distScore * 0.58f + angleScore * 0.42f;
+            if (a_cand.isLooseItem) {
+                score += 0.14f;
+            }
+        }
+        if (a_cand.isCurrentAssistTarget) {
+            score += 0.25f;
+        }
+        return score;
+    }
+
+    bool IsSolidWallCollisionLayer(std::uint8_t a_layer) noexcept
+    {
+        switch (a_layer) {
+        case 1:   // COL_LAYER::kStatic
+        case 2:   // COL_LAYER::kAnimStatic
+        case 13:  // COL_LAYER::kTerrain
+        case 17:  // COL_LAYER::kGround
+        case 27:  // COL_LAYER::kInvisibleWall
+        case 35:  // COL_LAYER::kCollisionBox
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    bool IsThirdPersonAssistLosClear(
+        bool a_hasHit,
+        bool a_hitTargetOrPlayer,
+        float a_hitFraction,
+        float a_rayDist,
+        float a_targetDeltaZ,
+        bool a_hitSolidWall,
+        bool a_allowWallRecess) noexcept
+    {
+        if (!a_hasHit || a_hitTargetOrPlayer) {
+            return true;
+        }
+        if (!std::isfinite(a_hitFraction) || !std::isfinite(a_rayDist) || !std::isfinite(a_targetDeltaZ)) {
+            return false;
+        }
+        const float clampedFrac = std::clamp(a_hitFraction, 0.0f, 1.0f);
+        const float remainingDist = a_rayDist * (1.0f - clampedFrac);
+        if (a_hitSolidWall) {
+            return a_allowWallRecess && (remainingDist <= 6.0f);
+        }
+        if (a_targetDeltaZ < -12.0f) {
+            return false;
+        }
+        return remainingDist <= 4.0f;
+    }
+
+    bool IsDisallowedAssistTargetNameOrVerb(
+        std::string_view a_displayName,
+        std::string_view a_verb,
+        bool a_isActivatorForm) noexcept
+    {
+        auto trimStr = [](std::string_view a_sv) -> std::string {
+            const auto first = a_sv.find_first_not_of(" \t\r\n");
+            if (first == std::string_view::npos) {
+                return {};
+            }
+            const auto last = a_sv.find_last_not_of(" \t\r\n");
+            return std::string(a_sv.substr(first, last - first + 1));
+        };
+        const std::string upperName = TargetInfo::ToUpperAscii(trimStr(a_displayName));
+        if (upperName == "DEFAULT DUMMY" ||
+            upperName == "DUMMY" ||
+            upperName == "OIL" ||
+            upperName == "OIL SLICK" ||
+            upperName == "OIL POOL" ||
+            upperName == "TRIGGER" ||
+            upperName == "MARKER" ||
+            upperName == "ACTIVATOR" ||
+            upperName == "COLLISION") {
+            return true;
+        }
+        if (a_isActivatorForm && !a_verb.empty()) {
+            const std::string upperVerb = TargetInfo::ToUpperAscii(trimStr(a_verb));
+            if (upperVerb == "ACTIVATE") {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool ShouldKeepLockedThirdPersonTarget(
+        std::uint32_t a_lockedFormId,
+        std::int64_t a_lockStartMs,
+        std::int64_t a_nowMs,
+        std::int64_t a_lockMs,
+        bool a_lockedStillValid,
+        bool a_crosshairHasTarget) noexcept
+    {
+        if (a_lockedFormId == 0 || a_lockMs <= 0 || !a_lockedStillValid || a_crosshairHasTarget) {
+            return false;
+        }
+        if (a_nowMs < a_lockStartMs) {
+            return false;
+        }
+        return (a_nowMs - a_lockStartMs) < a_lockMs;
+    }
+
+    bool StepPostHoldMenuGuard(
+        PostHoldMenuGuardState& a_state,
+        const PostHoldMenuGuardInput& a_in) noexcept
+    {
+        if (!a_state.armed) {
+            return false;
+        }
+
+        if (!a_in.inMenuMode) {
+            if (a_state.menuObserved || (a_in.nowMs - a_state.triggerMs) > a_in.armWindowMs) {
+                a_state = {};
+                return false;
+            }
+            if (a_state.waitRelease && a_in.isReleased &&
+                (a_in.isMatchingPhysicalKey || a_in.isConfirmFamilyEvent)) {
+                a_state.waitRelease = false;
+                a_state.releaseMs = a_in.nowMs;
+            }
+            return false;
+        }
+
+        if (!a_state.menuObserved) {
+            if ((a_in.nowMs - a_state.triggerMs) > a_in.armWindowMs) {
+                a_state = {};
+                return false;
+            }
+            a_state.menuObserved = true;
+            a_state.menuOpenMs = a_in.nowMs;
+        }
+
+        const bool isTargetInput = a_in.isMatchingPhysicalKey || a_in.isConfirmFamilyEvent;
+        if (!isTargetInput) {
+            return false;
+        }
+
+        if (a_state.waitRelease) {
+            if (a_in.isReleased) {
+                a_state.waitRelease = false;
+                a_state.releaseMs = a_in.nowMs;
+            }
+            return true;
+        }
+
+        const std::int64_t graceAnchor = std::max(a_state.menuOpenMs, a_state.releaseMs);
+        if ((a_in.nowMs - graceAnchor) < a_in.postReleaseGraceMs) {
+            return true;
+        }
+
+        a_state = {};
+        return false;
+    }
+
+    bool ShouldThirdPersonAssistOverrideCrosshair(
+        int a_mode,
+        bool a_hasCrosshairTarget,
+        bool a_crosshairIsQuickContainer,
+        bool a_crosshairIsLooseItem,
+        float a_crosshairDist,
+        float a_assistMaxDist) noexcept
+    {
+        if (a_crosshairIsQuickContainer) {
+            return false;
+        }
+        if (!a_hasCrosshairTarget) {
+            return true;
+        }
+        if (a_mode == 1) {
+            const float limit = std::max(a_assistMaxDist, 155.0f);
+            return !a_crosshairIsLooseItem &&
+                   (!std::isfinite(a_crosshairDist) || a_crosshairDist > limit);
+        }
+        return false;
+    }
+
+    bool DoesActionRequireHold(
+        std::string_view a_verb,
+        bool a_isCrime,
+        TargetInfo::ItemKind a_targetKind,
+        bool a_isLoadDoor,
+        const ConfigData& a_cfg,
+        bool a_isWaterTarget) noexcept
+    {
+        if (!a_cfg.holdToActivateEnabled || a_verb.empty()) {
+            return false;
+        }
+
+        if (a_cfg.holdDrink &&
+            (VerbMatchesToken(a_verb, "DRINK") ||
+             (a_isWaterTarget && VerbMatchesToken(a_verb, "ACTIVATE")))) {
+            return true;
+        }
+        if (a_cfg.holdSitSleep &&
+            (VerbMatchesToken(a_verb, "SIT") ||
+             VerbMatchesToken(a_verb, "SLEEP") ||
+             VerbMatchesToken(a_verb, "REST") ||
+             VerbMatchesToken(a_verb, "LAY"))) {
+            return true;
+        }
+        if (a_cfg.holdStealPickpocket &&
+            (VerbMatchesToken(a_verb, "STEAL") ||
+             VerbMatchesToken(a_verb, "PICKPOCKET") ||
+             (a_isCrime && a_targetKind != TargetInfo::ItemKind::Door))) {
+            return true;
+        }
+        if (a_cfg.holdEatCannibal &&
+            (VerbMatchesToken(a_verb, "EAT") ||
+             VerbMatchesToken(a_verb, "CANNIBAL") ||
+             VerbMatchesToken(a_verb, "DEVOUR") ||
+             VerbMatchesToken(a_verb, "CONSUME"))) {
+            return true;
+        }
+        if (a_cfg.holdCraftPowerArmor) {
+            if (VerbMatchesToken(a_verb, "CRAFT") ||
+                VerbMatchesToken(a_verb, "COOK") ||
+                VerbMatchesToken(a_verb, "WORKSHOP")) {
+                return true;
+            }
+            if (VerbMatchesToken(a_verb, "ENTER") &&
+                !a_isLoadDoor &&
+                (a_targetKind == TargetInfo::ItemKind::Furniture ||
+                 a_targetKind == TargetInfo::ItemKind::Armor ||
+                 a_targetKind == TargetInfo::ItemKind::None)) {
+                return true;
+            }
+            if (VerbMatchesToken(a_verb, "USE") &&
+                a_targetKind == TargetInfo::ItemKind::Furniture) {
+                return true;
+            }
+        }
+
+        if (!a_cfg.holdCustomVerbs.empty()) {
+            std::string_view csv = a_cfg.holdCustomVerbs;
+            std::size_t pos = 0;
+            while (pos <= csv.size()) {
+                const std::size_t comma = csv.find(',', pos);
+                std::string_view tok = (comma == std::string_view::npos)
+                    ? csv.substr(pos)
+                    : csv.substr(pos, comma - pos);
+                const auto f = tok.find_first_not_of(" \t\r\n");
+                if (f != std::string_view::npos) {
+                    const auto l = tok.find_last_not_of(" \t\r\n");
+                    tok = tok.substr(f, l - f + 1);
+                    if (VerbMatchesToken(a_verb, tok)) {
+                        return true;
+                    }
+                }
+                if (comma == std::string_view::npos) {
+                    break;
+                }
+                pos = comma + 1;
+            }
+        }
+
+        return false;
+    }
+
+    HoldToActivateDecision StepHoldToActivate(
+        HoldToActivateState& a_state,
+        const HoldToActivateInput& a_in,
+        std::int64_t a_nowMs,
+        std::int64_t a_durationMs,
+        std::int64_t a_staleHoldTimeoutMs) noexcept
+    {
+        if (a_in.isReleased || !a_in.isPressed) {
+            const bool wasActiveOrCompleted = a_state.active || a_state.completedWaitingRelease;
+            a_state = {};
+            return { wasActiveOrCompleted, false, 0.0f };
+        }
+
+        if (!a_in.requiresHold) {
+            if (a_state.completedWaitingRelease) {
+                return { true, false, 0.0f };
+            }
+            if (a_state.active) {
+                a_state.active = false;
+                a_state.progress = 0.0f;
+            }
+            return { false, false, 0.0f };
+        }
+
+        if (a_state.active &&
+            a_state.lastSeenMs > 0 &&
+            a_nowMs > a_state.lastSeenMs &&
+            (a_nowMs - a_state.lastSeenMs) > a_staleHoldTimeoutMs) {
+            a_state = {};
+        }
+
+        if (a_state.completedWaitingRelease) {
+            a_state.lastSeenMs = a_nowMs;
+            return { true, false, 1.0f };
+        }
+
+        if (!a_state.active) {
+            if (!a_in.isJustPressed) {
+                return { false, false, 0.0f };
+            }
+            a_state.active = true;
+            a_state.completedWaitingRelease = false;
+            a_state.targetKey = a_in.targetKey;
+            a_state.startMs = a_nowMs;
+            a_state.lastSeenMs = a_nowMs;
+            a_state.progress = 0.0f;
+            if (a_durationMs <= 0) {
+                a_state.active = false;
+                a_state.completedWaitingRelease = true;
+                a_state.progress = 1.0f;
+                return { true, true, 1.0f };
+            }
+            return { true, false, 0.0f };
+        }
+
+        if (a_in.targetKey != a_state.targetKey) {
+            // Target shifted mid-hold: cancel trigger until user releases & presses again
+            a_state.active = false;
+            a_state.completedWaitingRelease = true;
+            a_state.progress = 0.0f;
+            a_state.lastSeenMs = a_nowMs;
+            return { true, false, 0.0f };
+        }
+
+        a_state.lastSeenMs = a_nowMs;
+        const std::int64_t elapsed = std::max<std::int64_t>(0, a_nowMs - a_state.startMs);
+        if (elapsed >= a_durationMs || a_durationMs <= 0) {
+            a_state.active = false;
+            a_state.completedWaitingRelease = true;
+            a_state.progress = 1.0f;
+            return { true, true, 1.0f };
+        }
+
+        a_state.progress = std::clamp(
+            static_cast<float>(elapsed) / static_cast<float>(a_durationMs),
+            0.0f,
+            0.999f);
+        return { true, false, a_state.progress };
+    }
+
+    SyntheticHoldTapAction StepSyntheticHoldTap(
+        int& a_stage,
+        const void*& a_queueHead,
+        std::int64_t& a_triggerMs,
+        const void* a_curQueueHead,
+        bool a_isReleased,
+        std::int64_t a_nowMs,
+        std::int64_t a_timeoutMs) noexcept
+    {
+        if (a_stage == 0) {
+            return SyntheticHoldTapAction::kInactive;
+        }
+
+        if (a_stage == 1) {
+            if (a_queueHead == a_curQueueHead) {
+                if (a_isReleased) {
+                    a_stage = 0;
+                    a_queueHead = nullptr;
+                    a_triggerMs = 0;
+                    return SyntheticHoldTapAction::kSwallowAndResetHold;
+                }
+                return SyntheticHoldTapAction::kPassPress;
+            }
+            if (a_triggerMs > 0 && a_nowMs > a_triggerMs && (a_nowMs - a_triggerMs) > a_timeoutMs) {
+                a_stage = 0;
+                a_queueHead = nullptr;
+                a_triggerMs = 0;
+                return a_isReleased
+                    ? SyntheticHoldTapAction::kSwallowAndResetHold
+                    : SyntheticHoldTapAction::kSwallow;
+            }
+            if (a_isReleased) {
+                a_stage = 3;
+                a_queueHead = a_curQueueHead;
+                return SyntheticHoldTapAction::kPassReleaseAndResetHold;
+            }
+            a_stage = 2;
+            a_queueHead = a_curQueueHead;
+            return SyntheticHoldTapAction::kPassRelease;
+        }
+
+        if (a_stage == 2) {
+            // Check current queueHead BEFORE a_isReleased so PC/UI/HUD receive MC's synthetic key-up!
+            if (a_queueHead == a_curQueueHead) {
+                return SyntheticHoldTapAction::kPassRelease;
+            }
+            if (a_triggerMs > 0 && a_nowMs > a_triggerMs && (a_nowMs - a_triggerMs) > a_timeoutMs) {
+                a_stage = 0;
+                a_queueHead = nullptr;
+                a_triggerMs = 0;
+                return a_isReleased
+                    ? SyntheticHoldTapAction::kSwallowAndResetHold
+                    : SyntheticHoldTapAction::kSwallow;
+            }
+            if (a_isReleased) {
+                a_stage = 0;
+                a_queueHead = nullptr;
+                a_triggerMs = 0;
+                return SyntheticHoldTapAction::kSwallowAndResetHold;
+            }
+            return SyntheticHoldTapAction::kSwallow;
+        }
+
+        if (a_stage == 3) {
+            // Drain natural release across all input receivers on the same queueHead
+            if (a_queueHead == a_curQueueHead) {
+                return SyntheticHoldTapAction::kPassReleaseAndResetHold;
+            }
+            a_stage = 0;
+            a_queueHead = nullptr;
+            a_triggerMs = 0;
+            return SyntheticHoldTapAction::kInactive;
+        }
+
+        a_stage = 0;
+        a_queueHead = nullptr;
+        a_triggerMs = 0;
+        return SyntheticHoldTapAction::kInactive;
+    }
+
     bool ShouldBlockPostLootActivate(
         std::int64_t a_nowMs,
         std::int64_t a_lastTakeMs,
@@ -547,23 +1231,32 @@ namespace HUDController
             return 0;
         }
 
-        void EnrichWindowKindsFromMap(
+        void EnrichWindowFromSnapshot(
             std::vector<QuickContainerItemEntry>& a_items,
-            const std::unordered_map<std::string, TargetInfo::ItemKind>& a_kindMap)
+            const CachedInventorySnapshot& a_invSnap)
         {
-            if (a_kindMap.empty()) {
+            if (a_invSnap.kindByCleanUpper.empty() && a_invSnap.conditionByCleanUpper.empty()) {
                 return;
             }
             for (auto& item : a_items) {
-                if (item.itemKind != TargetInfo::ItemKind::None) {
+                if (item.itemKind != TargetInfo::ItemKind::None && item.hasCondition) {
                     continue;
                 }
                 const std::string key = CleanUpperKey(item.name);
                 if (key.empty()) {
                     continue;
                 }
-                if (const auto it = a_kindMap.find(key); it != a_kindMap.end()) {
-                    item.itemKind = it->second;
+                if (item.itemKind == TargetInfo::ItemKind::None) {
+                    if (const auto it = a_invSnap.kindByCleanUpper.find(key); it != a_invSnap.kindByCleanUpper.end()) {
+                        item.itemKind = it->second;
+                    }
+                }
+                if (!item.hasCondition) {
+                    if (const auto cIt = a_invSnap.conditionByCleanUpper.find(key);
+                        cIt != a_invSnap.conditionByCleanUpper.end()) {
+                        item.hasCondition = true;
+                        item.conditionPercent = cIt->second;
+                    }
                 }
             }
         }
@@ -1253,7 +1946,7 @@ namespace HUDController
         QuickContainerMergeResult res;
         if (!a_expandEnabled) {
             res = MergeQuickContainerInventory(a_rawWindow, a_rawSel, {}, 5);
-            EnrichWindowKindsFromMap(res.windowItems, a_invSnap.kindByCleanUpper);
+            EnrichWindowFromSnapshot(res.windowItems, a_invSnap);
             a_cache.consecutiveMisses = 0;
         } else {
             const bool skipExpansion = a_invSnap.truncatedByCap || a_cache.stickyFallback;
@@ -1286,7 +1979,7 @@ namespace HUDController
                     cachedPriority.empty() ? nullptr : &cachedPriority);
 
             if (skipExpansion) {
-                EnrichWindowKindsFromMap(res.windowItems, a_invSnap.kindByCleanUpper);
+                EnrichWindowFromSnapshot(res.windowItems, a_invSnap);
                 a_cache.consecutiveMisses = 0;
             } else if (res.expanded) {
                 a_cache.everExpanded = true;
@@ -1340,7 +2033,7 @@ namespace HUDController
                         a_cache.stickyFallback = true;
                     }
                 }
-                EnrichWindowKindsFromMap(res.windowItems, a_invSnap.kindByCleanUpper);
+                EnrichWindowFromSnapshot(res.windowItems, a_invSnap);
             }
         }
 
@@ -2960,17 +3653,27 @@ namespace HUDController
             }
         }
 
+        [[nodiscard]] std::uintptr_t ResolveVtableAddressSafe(REL::ID a_id)
+        {
+            const auto resolved = REL::IDDatabase::get().resolve(a_id);
+            if (!resolved.rva || *resolved.rva == 0) {
+                return 0;
+            }
+            return REL::Module::get().base() + *resolved.rva;
+        }
+
         [[nodiscard]] bool IsWeapInstanceData(const RE::TBO_InstanceData* a_ptr)
         {
             if (!a_ptr) {
                 return false;
             }
             static const std::uintptr_t weapInstVtbl =
-                REL::Relocation<std::uintptr_t>{ RE::TESObjectWEAP::InstanceData::VTABLE[0] }.address();
+                ResolveVtableAddressSafe(RE::TESObjectWEAP::InstanceData::VTABLE[0]);
             static const std::uintptr_t weapDataVtbl =
-                REL::Relocation<std::uintptr_t>{ RE::TESObjectWEAP::Data::VTABLE[0] }.address();
+                ResolveVtableAddressSafe(RE::TESObjectWEAP::Data::VTABLE[0]);
             const auto vtbl = *reinterpret_cast<const std::uintptr_t*>(a_ptr);
-            return vtbl == weapInstVtbl || vtbl == weapDataVtbl;
+            return (weapInstVtbl != 0 && vtbl == weapInstVtbl) ||
+                   (weapDataVtbl != 0 && vtbl == weapDataVtbl);
         }
 
         [[nodiscard]] bool IsArmoInstanceData(const RE::TBO_InstanceData* a_ptr)
@@ -2979,9 +3682,9 @@ namespace HUDController
                 return false;
             }
             static const std::uintptr_t armoInstVtbl =
-                REL::Relocation<std::uintptr_t>{ RE::TESObjectARMO::InstanceData::VTABLE[0] }.address();
+                ResolveVtableAddressSafe(RE::TESObjectARMO::InstanceData::VTABLE[0]);
             const auto vtbl = *reinterpret_cast<const std::uintptr_t*>(a_ptr);
-            return vtbl == armoInstVtbl;
+            return armoInstVtbl != 0 && vtbl == armoInstVtbl;
         }
 
         struct CachedQuickLootKeywords
@@ -3594,7 +4297,7 @@ namespace HUDController
                             }
                             a_out.items.push_back(std::move(entry));
                         }
-                        EnrichWindowKindsFromMap(a_out.items, a_invSnap.kindByCleanUpper);
+                        EnrichWindowFromSnapshot(a_out.items, a_invSnap);
                     } else {
                         std::vector<QuickContainerItemEntry> rawWindow;
                         const int readLimit = std::min(totalCount, 512);
@@ -3640,7 +4343,7 @@ namespace HUDController
                                 }
                                 a_out.items.push_back(std::move(entry));
                             }
-                            EnrichWindowKindsFromMap(a_out.items, a_invSnap.kindByCleanUpper);
+                            EnrichWindowFromSnapshot(a_out.items, a_invSnap);
                         } else {
                             const auto& merged = a_controller.ResolveMergedQuickContainerWindow(
                                 a_ownerFormID, a_invSnap, rawWindow, rawSel, maxRows, a_expandInventoryList);
@@ -3766,6 +4469,11 @@ namespace HUDController
         }
 
         inline constexpr std::uint32_t kCurrentCompanionFactionFormID = 0x00023C01u;
+
+        [[nodiscard]] bool IsRefDisabled(const RE::TESObjectREFR* a_ref) noexcept
+        {
+            return a_ref != nullptr && (a_ref->GetFormFlags() & (1u << 11)) != 0u;
+        }
 
         [[nodiscard]] bool IsActorDeadOrDying(const RE::Actor* a_actor) noexcept
         {
@@ -4058,7 +4766,15 @@ namespace HUDController
             const bool anyLatchSet =
                 ctrl._suppressedReadyHeld.load(std::memory_order_acquire) ||
                 ctrl._suppressedReadyHolstered.load(std::memory_order_acquire) ||
-                ctrl._customQcTakeLatched.load(std::memory_order_acquire);
+                ctrl._customQcTakeLatched.load(std::memory_order_acquire) ||
+                ctrl._tpAssistActivateLatched.load(std::memory_order_acquire) ||
+                ctrl._holdPrimaryActive.load(std::memory_order_acquire) ||
+                ctrl._holdPrimaryCompleted.load(std::memory_order_acquire) ||
+                ctrl._holdSecondaryActive.load(std::memory_order_acquire) ||
+                ctrl._holdSecondaryCompleted.load(std::memory_order_acquire) ||
+                ctrl._holdWaterTapStage.load(std::memory_order_acquire) != 0 ||
+                ctrl._holdSecTapStage.load(std::memory_order_acquire) != 0 ||
+                ctrl._holdSecQueueHead.load(std::memory_order_acquire) != nullptr;
             if (anyLatchSet) {
                 ctrl._inputResetEpoch.fetch_add(1, std::memory_order_acq_rel);
                 ctrl._customQcLastTakePressMs.store(0, std::memory_order_relaxed);
@@ -4070,7 +4786,130 @@ namespace HUDController
                 ctrl._suppressedReadyHolstered.store(false, std::memory_order_release);
                 ctrl._suppressedReadyHeld.store(false, std::memory_order_release);
                 ctrl._customQcTakeLatched.store(false, std::memory_order_release);
+                ctrl._tpAssistActivateLatched.store(false, std::memory_order_release);
+                ctrl._holdPrimaryActive.store(false, std::memory_order_release);
+                ctrl._holdPrimaryCompleted.store(false, std::memory_order_release);
+                ctrl._holdPrimaryProgress.store(0.0f, std::memory_order_release);
+                ctrl._holdSecondaryActive.store(false, std::memory_order_release);
+                ctrl._holdSecondaryCompleted.store(false, std::memory_order_release);
+                ctrl._holdSecondaryProgress.store(0.0f, std::memory_order_release);
+                ctrl._holdWaterTapStage.store(0, std::memory_order_release);
+                ctrl._holdWaterTapTriggerMs.store(0, std::memory_order_relaxed);
+                ctrl._holdWaterQueueHead.store(nullptr, std::memory_order_release);
+                ctrl._holdSecTapStage.store(0, std::memory_order_release);
+                ctrl._holdSecTapTriggerMs.store(0, std::memory_order_relaxed);
+                ctrl._holdSecQueueHead.store(nullptr, std::memory_order_release);
                 ctrl._inputResetEpoch.fetch_add(1, std::memory_order_acq_rel);
+            }
+
+            if (a_queueHead != nullptr && ctrl._postHoldGuardArmed.load(std::memory_order_acquire)) {
+                const std::int64_t nowMs = SteadyNowMs();
+                PostHoldMenuGuardState guardState{};
+                guardState.armed = true;
+                guardState.menuObserved = ctrl._postHoldGuardMenuObserved.load(std::memory_order_acquire);
+                guardState.waitRelease = ctrl._postHoldGuardWaitRelease.load(std::memory_order_acquire);
+                guardState.triggerMs = ctrl._postHoldGuardTriggerMs.load(std::memory_order_relaxed);
+                guardState.menuOpenMs = ctrl._postHoldGuardMenuOpenMs.load(std::memory_order_relaxed);
+                guardState.releaseMs = ctrl._postHoldGuardReleaseMs.load(std::memory_order_relaxed);
+                guardState.boundDevice = ctrl._postHoldGuardDevice.load(std::memory_order_relaxed);
+                guardState.boundIdCode = ctrl._postHoldGuardIdCode.load(std::memory_order_relaxed);
+
+                for (auto* ev = const_cast<RE::InputEvent*>(a_queueHead); ev; ev = ev->next) {
+                    if (ev->handled.get() == RE::InputEvent::HANDLED_RESULT::kStop) {
+                        continue;
+                    }
+                    auto* btn = ev->As<RE::ButtonEvent>();
+                    if (!btn || btn->QDisabled()) {
+                        continue;
+                    }
+                    const auto& ue = btn->QUserEvent();
+                    const auto dev = static_cast<std::uint32_t>(btn->device.get());
+                    const auto idCode = btn->QIDCode();
+                    const bool matchesPhysical =
+                        (guardState.boundDevice != 0xFFFFFFFFu &&
+                         dev == guardState.boundDevice &&
+                         idCode == guardState.boundIdCode);
+                    const bool isConfirmFamily =
+                        (ue == "Accept"sv || ue == "Activate"sv || ue == "SpecialActivate"sv ||
+                         ue == "QCTakeItem"sv || ue == "Confirm"sv || ue == "SecondaryActivate"sv ||
+                         ue == "QCOpenTransferMenu"sv || ue == "ReadyWeapon"sv ||
+                         ue == "XButton"sv || ue == "AButton"sv);
+                    PostHoldMenuGuardInput gIn{};
+                    gIn.inMenuMode = true;
+                    gIn.isMatchingPhysicalKey = matchesPhysical;
+                    gIn.isConfirmFamilyEvent = isConfirmFamily;
+                    gIn.isPressed = (btn->QAnalogValue() != 0.0f);
+                    gIn.isReleased = (btn->QAnalogValue() == 0.0f);
+                    gIn.isJustPressed = btn->QJustPressed();
+                    gIn.nowMs = nowMs;
+                    if (StepPostHoldMenuGuard(guardState, gIn)) {
+                        SwallowButtonEvent(ev, btn);
+                    }
+                    if (!guardState.armed) {
+                        break;
+                    }
+                }
+
+                if (!guardState.menuObserved && guardState.armed) {
+                    PostHoldMenuGuardInput pingIn{};
+                    pingIn.inMenuMode = true;
+                    pingIn.nowMs = nowMs;
+                    (void)StepPostHoldMenuGuard(guardState, pingIn);
+                }
+
+                ctrl._postHoldGuardMenuObserved.store(guardState.menuObserved, std::memory_order_release);
+                ctrl._postHoldGuardWaitRelease.store(guardState.waitRelease, std::memory_order_release);
+                ctrl._postHoldGuardMenuOpenMs.store(guardState.menuOpenMs, std::memory_order_relaxed);
+                ctrl._postHoldGuardReleaseMs.store(guardState.releaseMs, std::memory_order_relaxed);
+                ctrl._postHoldGuardArmed.store(guardState.armed, std::memory_order_release);
+            }
+
+            if (a_queueHead != nullptr && ui->GetMenuOpen("ExamineMenu"sv)) {
+                auto exMenu = ui->GetMenu<RE::ExamineMenu>();
+                const std::uint8_t rawFeatured = exMenu
+                    ? *reinterpret_cast<const std::uint8_t*>(&exMenu->inspectingFeaturedItem)
+                    : 0u;
+                if (exMenu && rawFeatured == 1u) {
+                    const std::int64_t nowMs = SteadyNowMs();
+                    std::int64_t openMs = ctrl._featuredExamineOpenMs.load(std::memory_order_acquire);
+                    if (openMs == 0) {
+                        openMs = nowMs;
+                        ctrl._featuredExamineOpenMs.store(openMs, std::memory_order_release);
+                    }
+                    const std::int64_t graceMs = ctrl._featuredExamineGraceMs.load(std::memory_order_relaxed);
+                    bool waitRel = ctrl._featuredExamineWaitRelease.load(std::memory_order_acquire);
+
+                    for (auto* ev = const_cast<RE::InputEvent*>(a_queueHead); ev; ev = ev->next) {
+                        if (ev->handled.get() == RE::InputEvent::HANDLED_RESULT::kStop) {
+                            continue;
+                        }
+                        auto* btn = ev->As<RE::ButtonEvent>();
+                        if (!btn || btn->QDisabled()) {
+                            continue;
+                        }
+                        const auto& ue = btn->QUserEvent();
+                        const bool isDismiss =
+                            (ue == "Accept"sv || ue == "Cancel"sv || ue == "Activate"sv ||
+                             ue == "QCTakeItem"sv || ue == "SpecialActivate"sv ||
+                             ue == "Back"sv || ue == "Close"sv || ue == "TweenMenu"sv);
+                        if (!isDismiss) {
+                            continue;
+                        }
+                        FeaturedExamineInput fin{};
+                        fin.isFeaturedExamineOpen = true;
+                        fin.isDismissEvent = true;
+                        fin.isPressed = (btn->QAnalogValue() != 0.0f);
+                        fin.isReleased = (btn->QAnalogValue() == 0.0f);
+                        fin.isJustPressed = btn->QJustPressed();
+                        fin.openTimeMs = openMs;
+                        fin.nowMs = nowMs;
+                        fin.graceMs = graceMs;
+                        if (StepFeaturedExamineGuard(waitRel, fin)) {
+                            SwallowButtonEvent(ev, btn);
+                        }
+                    }
+                    ctrl._featuredExamineWaitRelease.store(waitRel, std::memory_order_release);
+                }
             }
             return pendingAction;
         }
@@ -4086,6 +4925,8 @@ namespace HUDController
                 bool readyHeld = ctrl._suppressedReadyHeld.load(std::memory_order_acquire);
                 bool dirtyTake = false;
                 bool dirtyReady = false;
+                bool dirtyHoldPri = false;
+                bool dirtyHoldSec = false;
 
                 for (const auto* ev = a_queueHead; ev; ev = ev->next) {
                     const auto* btn = ev->As<RE::ButtonEvent>();
@@ -4110,8 +4951,15 @@ namespace HUDController
                         readyHeld = false;
                         dirtyReady = true;
                     }
+                    if (isTakeFamily) {
+                        dirtyHoldPri = true;
+                    }
+                    if (userEvent == "SecondaryActivate"sv || userEvent == "QCOpenTransferMenu"sv ||
+                        userEvent == "ReadyWeapon"sv) {
+                        dirtyHoldSec = true;
+                    }
                 }
-                if ((dirtyTake || dirtyReady) &&
+                if ((dirtyTake || dirtyReady || dirtyHoldPri || dirtyHoldSec) &&
                     (startEpoch & 1u) == 0u &&
                     ctrl._inputResetEpoch.load(std::memory_order_acquire) == startEpoch) {
                     if (dirtyTake) {
@@ -4123,6 +4971,22 @@ namespace HUDController
                     if (dirtyReady) {
                         ctrl._suppressedReadyHolstered.store(false, std::memory_order_release);
                         ctrl._suppressedReadyHeld.store(false, std::memory_order_release);
+                    }
+                    if (dirtyHoldPri) {
+                        ctrl._holdPrimaryActive.store(false, std::memory_order_release);
+                        ctrl._holdPrimaryCompleted.store(false, std::memory_order_release);
+                        ctrl._holdPrimaryProgress.store(0.0f, std::memory_order_release);
+                        ctrl._holdWaterTapStage.store(0, std::memory_order_release);
+                        ctrl._holdWaterQueueHead.store(nullptr, std::memory_order_release);
+                        ctrl._holdWaterTapTriggerMs.store(0, std::memory_order_relaxed);
+                    }
+                    if (dirtyHoldSec) {
+                        ctrl._holdSecondaryActive.store(false, std::memory_order_release);
+                        ctrl._holdSecondaryCompleted.store(false, std::memory_order_release);
+                        ctrl._holdSecondaryProgress.store(0.0f, std::memory_order_release);
+                        ctrl._holdSecTapStage.store(0, std::memory_order_release);
+                        ctrl._holdSecQueueHead.store(nullptr, std::memory_order_release);
+                        ctrl._holdSecTapTriggerMs.store(0, std::memory_order_relaxed);
                     }
                 }
             }
@@ -4189,6 +5053,43 @@ namespace HUDController
         takeLatch.latchSetMs = ctrl._customQcLatchSetMs.load(std::memory_order_relaxed);
         QuickLootTakePassState takePass{};
         bool touchedTakeLatch = false;
+
+        const bool holdPrimaryReq = ctrl._holdPrimaryRequired.load(std::memory_order_acquire);
+        const bool holdSecondaryReq = ctrl._holdSecondaryRequired.load(std::memory_order_acquire);
+        const bool holdUseSyntheticTap = ctrl._holdPrimaryUseSyntheticTap.load(std::memory_order_acquire);
+        const bool holdInQc = ctrl._holdInQuickContainer.load(std::memory_order_acquire);
+        const std::uint64_t holdTgtKey = ctrl._holdTargetKey.load(std::memory_order_acquire);
+        const std::int64_t holdDurMs = ctrl._holdDurationMs.load(std::memory_order_relaxed);
+        const bool customTakeOwnsPrimary = customActive && customTakeEnabled;
+        const bool tpAssistOn = ctrl._tpAssistActive.load(std::memory_order_acquire);
+        bool tpLatched = ctrl._tpAssistActivateLatched.load(std::memory_order_acquire);
+        bool touchedTpLatch = false;
+
+        HoldToActivateState holdPrimaryState{};
+        holdPrimaryState.active = ctrl._holdPrimaryActive.load(std::memory_order_acquire);
+        holdPrimaryState.completedWaitingRelease = ctrl._holdPrimaryCompleted.load(std::memory_order_acquire);
+        holdPrimaryState.targetKey = ctrl._holdPrimaryActiveKey.load(std::memory_order_relaxed);
+        holdPrimaryState.startMs = ctrl._holdPrimaryStartMs.load(std::memory_order_relaxed);
+        holdPrimaryState.lastSeenMs = ctrl._holdPrimaryLastSeenMs.load(std::memory_order_relaxed);
+        holdPrimaryState.progress = ctrl._holdPrimaryProgress.load(std::memory_order_relaxed);
+        bool touchedHoldPrimary = false;
+        bool steppedPrimaryHoldThisPass = false;
+        HoldToActivateDecision primaryPassDec{};
+        bool steppedPrimaryTapThisPass = false;
+        SyntheticHoldTapAction primaryTapPassAct = SyntheticHoldTapAction::kInactive;
+
+        HoldToActivateState holdSecondaryState{};
+        holdSecondaryState.active = ctrl._holdSecondaryActive.load(std::memory_order_acquire);
+        holdSecondaryState.completedWaitingRelease = ctrl._holdSecondaryCompleted.load(std::memory_order_acquire);
+        holdSecondaryState.targetKey = ctrl._holdSecondaryActiveKey.load(std::memory_order_relaxed);
+        holdSecondaryState.startMs = ctrl._holdSecondaryStartMs.load(std::memory_order_relaxed);
+        holdSecondaryState.lastSeenMs = ctrl._holdSecondaryLastSeenMs.load(std::memory_order_relaxed);
+        holdSecondaryState.progress = ctrl._holdSecondaryProgress.load(std::memory_order_relaxed);
+        bool touchedHoldSecondary = false;
+        bool steppedSecondaryHoldThisPass = false;
+        HoldToActivateDecision secondaryPassDec{};
+        bool steppedSecondaryTapThisPass = false;
+        SyntheticHoldTapAction secTapPassAct = SyntheticHoldTapAction::kInactive;
 
         for (auto* ev = const_cast<RE::InputEvent*>(a_queueHead); ev; ev = ev->next) {
             if (ev->handled.get() == RE::InputEvent::HANDLED_RESULT::kStop) {
@@ -4285,7 +5186,13 @@ namespace HUDController
             }
 
             // 4. Prevent accidental corpse/object grab or post-empty activation right after fast looting
-            if (!customActive && (userEvent == "Activate"sv || userEvent == "SpecialActivate"sv)) {
+            const bool holdPrimaryEngaged =
+                holdPrimaryReq ||
+                holdPrimaryState.active ||
+                holdPrimaryState.completedWaitingRelease ||
+                (ctrl._holdWaterTapStage.load(std::memory_order_acquire) != 0) ||
+                steppedPrimaryTapThisPass;
+            if (!customActive && !holdPrimaryEngaged && (userEvent == "Activate"sv || userEvent == "SpecialActivate"sv)) {
                 const bool isJust = btn->QJustPressed();
                 const bool isHeld = (btn->QAnalogValue() != 0.0f);
                 if (isHeld &&
@@ -4296,6 +5203,223 @@ namespace HUDController
                         isJust,
                         isHeld,
                         isAlreadyGrabbing)) {
+                    SwallowButtonEvent(ev, btn);
+                    continue;
+                }
+            }
+
+            // 4b. Hold-to-Activate protection for risky/unwanted primary actions (Rollover, World Water, Workbenches, Power Armor, Steal Containers)
+            if (!customTakeOwnsPrimary && !isAlreadyGrabbing &&
+                (userEvent == "Activate"sv || userEvent == "SpecialActivate"sv || (holdInQc && userEvent == "QCTakeItem"sv))) {
+                const bool isJust = btn->QJustPressed();
+                const bool isHeld = (btn->QAnalogValue() != 0.0f);
+                const bool isRel = (btn->QAnalogValue() == 0.0f);
+
+                int tapStage = ctrl._holdWaterTapStage.load(std::memory_order_acquire);
+                const void* tapQH = ctrl._holdWaterQueueHead.load(std::memory_order_acquire);
+                std::int64_t tapMs = ctrl._holdWaterTapTriggerMs.load(std::memory_order_relaxed);
+
+                if (userEvent == "SpecialActivate"sv) {
+                    if (tapStage != 0 || holdPrimaryReq || holdPrimaryState.active || holdPrimaryState.completedWaitingRelease) {
+                        SwallowButtonEvent(ev, btn);
+                        continue;
+                    }
+                } else {
+                    if (tapStage != 0 || steppedPrimaryTapThisPass) {
+                        if (!steppedPrimaryTapThisPass) {
+                            primaryTapPassAct = StepSyntheticHoldTap(tapStage, tapQH, tapMs, a_queueHead, isRel, nowMs, 1500);
+                            ctrl._holdWaterTapStage.store(tapStage, std::memory_order_release);
+                            ctrl._holdWaterQueueHead.store(tapQH, std::memory_order_release);
+                            ctrl._holdWaterTapTriggerMs.store(tapMs, std::memory_order_relaxed);
+                            steppedPrimaryTapThisPass = true;
+                        }
+                        switch (primaryTapPassAct) {
+                        case SyntheticHoldTapAction::kPassPress:
+                            btn->heldDownSecs = 0.0f;
+                            continue;
+                        case SyntheticHoldTapAction::kPassRelease:
+                            btn->value = 0.0f;
+                            btn->heldDownSecs = 0.05f;
+                            continue;
+                        case SyntheticHoldTapAction::kPassReleaseAndResetHold:
+                            holdPrimaryState = {};
+                            touchedHoldPrimary = true;
+                            continue;
+                        case SyntheticHoldTapAction::kSwallowAndResetHold:
+                            holdPrimaryState = {};
+                            touchedHoldPrimary = true;
+                            SwallowButtonEvent(ev, btn);
+                            continue;
+                        case SyntheticHoldTapAction::kSwallow:
+                            SwallowButtonEvent(ev, btn);
+                            continue;
+                        case SyntheticHoldTapAction::kInactive:
+                        default:
+                            break;
+                        }
+                    }
+
+                    if (holdPrimaryReq || holdPrimaryState.active || holdPrimaryState.completedWaitingRelease) {
+                        if (!steppedPrimaryHoldThisPass) {
+                            HoldToActivateInput hIn{};
+                            hIn.requiresHold = holdPrimaryReq;
+                            hIn.targetKey = holdTgtKey;
+                            hIn.isJustPressed = isJust;
+                            hIn.isPressed = isHeld;
+                            hIn.isReleased = isRel;
+                            primaryPassDec = StepHoldToActivate(holdPrimaryState, hIn, nowMs, holdDurMs);
+                            steppedPrimaryHoldThisPass = true;
+                            touchedHoldPrimary = true;
+                        }
+                        if (primaryPassDec.triggerNow) {
+                            ctrl._postHoldGuardTriggerMs.store(nowMs, std::memory_order_relaxed);
+                            ctrl._postHoldGuardMenuOpenMs.store(0, std::memory_order_relaxed);
+                            ctrl._postHoldGuardReleaseMs.store(0, std::memory_order_relaxed);
+                            ctrl._postHoldGuardDevice.store(dev, std::memory_order_relaxed);
+                            ctrl._postHoldGuardIdCode.store(idCode, std::memory_order_relaxed);
+                            ctrl._postHoldGuardMenuObserved.store(false, std::memory_order_release);
+                            ctrl._postHoldGuardWaitRelease.store(true, std::memory_order_release);
+                            ctrl._postHoldGuardArmed.store(true, std::memory_order_release);
+                            if (holdUseSyntheticTap) {
+                                if (!steppedPrimaryTapThisPass) {
+                                    ctrl._holdWaterTapStage.store(1, std::memory_order_release);
+                                    ctrl._holdWaterTapTriggerMs.store(nowMs, std::memory_order_relaxed);
+                                    ctrl._holdWaterQueueHead.store(a_queueHead, std::memory_order_release);
+                                    steppedPrimaryTapThisPass = true;
+                                    primaryTapPassAct = SyntheticHoldTapAction::kPassPress;
+                                }
+                                btn->heldDownSecs = 0.0f;
+                                continue;
+                            }
+                            ctrl._holdPrimaryActivateRequested.store(true, std::memory_order_release);
+                            SwallowButtonEvent(ev, btn);
+                            continue;
+                        }
+                        if (primaryPassDec.swallowEvent) {
+                            SwallowButtonEvent(ev, btn);
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            // 4c. Hold-to-Activate protection for SecondaryActivate / QCOpenTransferMenu (and block ReadyWeapon while active)
+            if (!isAlreadyGrabbing &&
+                (userEvent == "SecondaryActivate"sv || (holdInQc && userEvent == "QCOpenTransferMenu"sv) || userEvent == "ReadyWeapon"sv) &&
+                (holdSecondaryReq || holdSecondaryState.active || holdSecondaryState.completedWaitingRelease ||
+                 ctrl._holdSecTapStage.load(std::memory_order_acquire) != 0 || steppedSecondaryTapThisPass)) {
+                if (userEvent == "ReadyWeapon"sv) {
+                    const bool rwRel = (btn->QAnalogValue() == 0.0f);
+                    const bool rwJust = btn->QJustPressed();
+                    if (!holdSecondaryReq && (rwRel || rwJust)) {
+                        ctrl._holdSecTapStage.store(0, std::memory_order_release);
+                        ctrl._holdSecQueueHead.store(nullptr, std::memory_order_release);
+                        ctrl._holdSecTapTriggerMs.store(0, std::memory_order_relaxed);
+                        holdSecondaryState = {};
+                        touchedHoldSecondary = true;
+                        if (rwJust) {
+                            continue;
+                        }
+                    }
+                    SwallowButtonEvent(ev, btn);
+                    continue;
+                }
+                const bool isPressed = (btn->QAnalogValue() != 0.0f);
+                const bool isRel = !isPressed;
+
+                int secTapStage = ctrl._holdSecTapStage.load(std::memory_order_acquire);
+                const void* secTapQH = ctrl._holdSecQueueHead.load(std::memory_order_acquire);
+                std::int64_t secTapMs = ctrl._holdSecTapTriggerMs.load(std::memory_order_relaxed);
+
+                if (secTapStage != 0 || steppedSecondaryTapThisPass) {
+                    if (!steppedSecondaryTapThisPass) {
+                        secTapPassAct = StepSyntheticHoldTap(secTapStage, secTapQH, secTapMs, a_queueHead, isRel, nowMs, 1500);
+                        ctrl._holdSecTapStage.store(secTapStage, std::memory_order_release);
+                        ctrl._holdSecQueueHead.store(secTapQH, std::memory_order_release);
+                        ctrl._holdSecTapTriggerMs.store(secTapMs, std::memory_order_relaxed);
+                        steppedSecondaryTapThisPass = true;
+                    }
+                    switch (secTapPassAct) {
+                    case SyntheticHoldTapAction::kPassPress:
+                        btn->heldDownSecs = 0.0f;
+                        continue;
+                    case SyntheticHoldTapAction::kPassRelease:
+                        btn->value = 0.0f;
+                        btn->heldDownSecs = 0.05f;
+                        continue;
+                    case SyntheticHoldTapAction::kPassReleaseAndResetHold:
+                        holdSecondaryState = {};
+                        touchedHoldSecondary = true;
+                        continue;
+                    case SyntheticHoldTapAction::kSwallowAndResetHold:
+                        holdSecondaryState = {};
+                        touchedHoldSecondary = true;
+                        SwallowButtonEvent(ev, btn);
+                        continue;
+                    case SyntheticHoldTapAction::kSwallow:
+                        SwallowButtonEvent(ev, btn);
+                        continue;
+                    case SyntheticHoldTapAction::kInactive:
+                    default:
+                        break;
+                    }
+                }
+
+                if (holdSecondaryReq || holdSecondaryState.active || holdSecondaryState.completedWaitingRelease) {
+                    if (!steppedSecondaryHoldThisPass) {
+                        HoldToActivateInput hIn{};
+                        hIn.requiresHold = holdSecondaryReq;
+                        hIn.targetKey = holdTgtKey;
+                        hIn.isJustPressed = btn->QJustPressed();
+                        hIn.isPressed = isPressed;
+                        hIn.isReleased = isRel;
+                        secondaryPassDec = StepHoldToActivate(holdSecondaryState, hIn, nowMs, holdDurMs);
+                        steppedSecondaryHoldThisPass = true;
+                        touchedHoldSecondary = true;
+                    }
+                    if (secondaryPassDec.triggerNow) {
+                        ctrl._postHoldGuardTriggerMs.store(nowMs, std::memory_order_relaxed);
+                        ctrl._postHoldGuardMenuOpenMs.store(0, std::memory_order_relaxed);
+                        ctrl._postHoldGuardReleaseMs.store(0, std::memory_order_relaxed);
+                        ctrl._postHoldGuardDevice.store(dev, std::memory_order_relaxed);
+                        ctrl._postHoldGuardIdCode.store(idCode, std::memory_order_relaxed);
+                        ctrl._postHoldGuardMenuObserved.store(false, std::memory_order_release);
+                        ctrl._postHoldGuardWaitRelease.store(true, std::memory_order_release);
+                        ctrl._postHoldGuardArmed.store(true, std::memory_order_release);
+                        if (!steppedSecondaryTapThisPass) {
+                            ctrl._holdSecTapStage.store(1, std::memory_order_release);
+                            ctrl._holdSecTapTriggerMs.store(nowMs, std::memory_order_relaxed);
+                            ctrl._holdSecQueueHead.store(a_queueHead, std::memory_order_release);
+                            steppedSecondaryTapThisPass = true;
+                            secTapPassAct = SyntheticHoldTapAction::kPassPress;
+                        }
+                        btn->heldDownSecs = 0.0f;
+                        continue;
+                    }
+                    if (secondaryPassDec.swallowEvent) {
+                        SwallowButtonEvent(ev, btn);
+                        continue;
+                    }
+                }
+            }
+
+            // 4d. Third-person proximity assist activation (non-hold path)
+            if (!customActive && !isAlreadyGrabbing &&
+                (userEvent == "Activate"sv || userEvent == "SpecialActivate"sv) &&
+                (tpAssistOn || tpLatched) && !holdPrimaryReq) {
+                if (btn->QAnalogValue() == 0.0f) {
+                    if (tpLatched) {
+                        tpLatched = false;
+                        touchedTpLatch = true;
+                        SwallowButtonEvent(ev, btn);
+                        continue;
+                    }
+                } else if (tpAssistOn) {
+                    if (btn->QJustPressed() && !tpLatched) {
+                        tpLatched = true;
+                        touchedTpLatch = true;
+                        ctrl._tpAssistActivateRequested.store(true, std::memory_order_release);
+                    }
                     SwallowButtonEvent(ev, btn);
                     continue;
                 }
@@ -4323,6 +5447,59 @@ namespace HUDController
         }
 
         if ((startEpoch & 1u) == 0u &&
+            ctrl._inputResetEpoch.load(std::memory_order_acquire) == startEpoch &&
+            ctrl._postHoldGuardArmed.load(std::memory_order_acquire)) {
+            PostHoldMenuGuardState guardState{};
+            guardState.armed = true;
+            guardState.menuObserved = ctrl._postHoldGuardMenuObserved.load(std::memory_order_acquire);
+            guardState.waitRelease = ctrl._postHoldGuardWaitRelease.load(std::memory_order_acquire);
+            guardState.triggerMs = ctrl._postHoldGuardTriggerMs.load(std::memory_order_relaxed);
+            guardState.menuOpenMs = ctrl._postHoldGuardMenuOpenMs.load(std::memory_order_relaxed);
+            guardState.releaseMs = ctrl._postHoldGuardReleaseMs.load(std::memory_order_relaxed);
+            guardState.boundDevice = ctrl._postHoldGuardDevice.load(std::memory_order_relaxed);
+            guardState.boundIdCode = ctrl._postHoldGuardIdCode.load(std::memory_order_relaxed);
+
+            bool updated = false;
+            if (primaryTapPassAct != SyntheticHoldTapAction::kPassRelease &&
+                secTapPassAct != SyntheticHoldTapAction::kPassRelease) {
+                for (const auto* ev = a_queueHead; ev; ev = ev->next) {
+                    const auto* btn = ev->As<RE::ButtonEvent>();
+                    if (!btn || btn->QDisabled() || btn->QAnalogValue() != 0.0f) {
+                        continue;
+                    }
+                    const auto dev = static_cast<std::uint32_t>(btn->device.get());
+                    const auto idCode = btn->QIDCode();
+                    const auto& ue = btn->QUserEvent();
+                    PostHoldMenuGuardInput gIn{};
+                    gIn.inMenuMode = false;
+                    gIn.isMatchingPhysicalKey =
+                        (guardState.boundDevice != 0xFFFFFFFFu &&
+                         dev == guardState.boundDevice &&
+                         idCode == guardState.boundIdCode);
+                    gIn.isConfirmFamilyEvent =
+                        (ue == "Activate"sv || ue == "SpecialActivate"sv || ue == "QCTakeItem"sv ||
+                         ue == "SecondaryActivate"sv || ue == "QCOpenTransferMenu"sv);
+                    gIn.isReleased = true;
+                    gIn.nowMs = nowMs;
+                    (void)StepPostHoldMenuGuard(guardState, gIn);
+                    updated = true;
+                    if (!guardState.armed) {
+                        break;
+                    }
+                }
+            }
+            if (!updated) {
+                PostHoldMenuGuardInput pingIn{};
+                pingIn.inMenuMode = false;
+                pingIn.nowMs = nowMs;
+                (void)StepPostHoldMenuGuard(guardState, pingIn);
+            }
+            ctrl._postHoldGuardWaitRelease.store(guardState.waitRelease, std::memory_order_release);
+            ctrl._postHoldGuardReleaseMs.store(guardState.releaseMs, std::memory_order_relaxed);
+            ctrl._postHoldGuardArmed.store(guardState.armed, std::memory_order_release);
+        }
+
+        if ((startEpoch & 1u) == 0u &&
             ctrl._inputResetEpoch.load(std::memory_order_acquire) == startEpoch) {
             if (touchedReadyState) {
                 ctrl._suppressedReadyStartMs.store(readyState.startMs, std::memory_order_relaxed);
@@ -4336,6 +5513,25 @@ namespace HUDController
                 ctrl._customQcTakeDevice.store(takeLatch.boundDevice, std::memory_order_relaxed);
                 ctrl._customQcTakeIdCode.store(takeLatch.boundIdCode, std::memory_order_relaxed);
                 ctrl._customQcTakeLatched.store(takeLatch.latched, std::memory_order_release);
+            }
+            if (touchedTpLatch) {
+                ctrl._tpAssistActivateLatched.store(tpLatched, std::memory_order_release);
+            }
+            if (touchedHoldPrimary) {
+                ctrl._holdPrimaryActiveKey.store(holdPrimaryState.targetKey, std::memory_order_relaxed);
+                ctrl._holdPrimaryStartMs.store(holdPrimaryState.startMs, std::memory_order_relaxed);
+                ctrl._holdPrimaryLastSeenMs.store(holdPrimaryState.lastSeenMs, std::memory_order_relaxed);
+                ctrl._holdPrimaryProgress.store(holdPrimaryState.progress, std::memory_order_release);
+                ctrl._holdPrimaryCompleted.store(holdPrimaryState.completedWaitingRelease, std::memory_order_release);
+                ctrl._holdPrimaryActive.store(holdPrimaryState.active, std::memory_order_release);
+            }
+            if (touchedHoldSecondary) {
+                ctrl._holdSecondaryActiveKey.store(holdSecondaryState.targetKey, std::memory_order_relaxed);
+                ctrl._holdSecondaryStartMs.store(holdSecondaryState.startMs, std::memory_order_relaxed);
+                ctrl._holdSecondaryLastSeenMs.store(holdSecondaryState.lastSeenMs, std::memory_order_relaxed);
+                ctrl._holdSecondaryProgress.store(holdSecondaryState.progress, std::memory_order_release);
+                ctrl._holdSecondaryCompleted.store(holdSecondaryState.completedWaitingRelease, std::memory_order_release);
+                ctrl._holdSecondaryActive.store(holdSecondaryState.active, std::memory_order_release);
             }
         }
 
@@ -4478,6 +5674,14 @@ namespace HUDController
                     return false;
                 }
 
+                if (evName == "ReadyWeapon"sv &&
+                    (ctrl._holdSecondaryRequired.load(std::memory_order_acquire) ||
+                     ctrl._holdSecondaryActive.load(std::memory_order_acquire) ||
+                     ctrl._holdSecondaryCompleted.load(std::memory_order_acquire) ||
+                     ctrl._holdSecTapStage.load(std::memory_order_acquire) != 0)) {
+                    return false;
+                }
+
                 if (evName == "ReadyWeapon"sv && blockCompReady) {
                     const bool heldActive =
                         ctrl._readyWeaponIsHeldStateHandler.load(std::memory_order_acquire) &&
@@ -4564,13 +5768,36 @@ namespace HUDController
         if (a_event) {
             if (const auto* btn = a_event->As<RE::ButtonEvent>()) {
                 const auto& evName = btn->QUserEvent();
-                if (evName == "Activate"sv || evName == "SpecialActivate"sv) {
-                    if (ctrl._customQcTakeLatched.load(std::memory_order_acquire)) {
+                const bool customTakeOwnsPrimary =
+                    ctrl._customQcActive.load(std::memory_order_acquire) &&
+                    ctrl._customQcTakeEnabled.load(std::memory_order_acquire);
+                const bool holdInQc = ctrl._holdInQuickContainer.load(std::memory_order_acquire);
+                if (evName == "SecondaryActivate"sv || (holdInQc && evName == "QCOpenTransferMenu"sv)) {
+                    if (ctrl._holdSecTapStage.load(std::memory_order_acquire) == 0 &&
+                        (ctrl._holdSecondaryRequired.load(std::memory_order_acquire) ||
+                         ctrl._holdSecondaryActive.load(std::memory_order_acquire) ||
+                         ctrl._holdSecondaryCompleted.load(std::memory_order_acquire))) {
+                        return false;
+                    }
+                }
+                if (evName == "Activate"sv || evName == "SpecialActivate"sv ||
+                    (!customTakeOwnsPrimary && holdInQc && evName == "QCTakeItem"sv)) {
+                    if (evName != "QCTakeItem"sv && ctrl._customQcTakeLatched.load(std::memory_order_acquire)) {
                         return false;
                     }
                     auto* player = RE::PlayerCharacter::GetSingleton();
                     const bool isAlreadyGrabbing = (player && static_cast<bool>(player->grabbedObject));
-                    if (ShouldBlockPostLootActivate(
+                    if (ctrl._holdWaterTapStage.load(std::memory_order_acquire) == 0 &&
+                        !isAlreadyGrabbing &&
+                        (ctrl._tpAssistActive.load(std::memory_order_acquire) ||
+                         ctrl._tpAssistActivateLatched.load(std::memory_order_acquire) ||
+                         ctrl._holdPrimaryRequired.load(std::memory_order_acquire) ||
+                         ctrl._holdPrimaryActive.load(std::memory_order_acquire) ||
+                         ctrl._holdPrimaryCompleted.load(std::memory_order_acquire))) {
+                        return false;
+                    }
+                    if (evName != "QCTakeItem"sv &&
+                        ShouldBlockPostLootActivate(
                             SteadyNowMs(),
                             ctrl._lastQuickLootTakeMs.load(std::memory_order_acquire),
                             ctrl._lastQuickLootEmptyMs.load(std::memory_order_acquire),
@@ -4762,6 +5989,7 @@ namespace HUDController
         _cachedInvSnapshot.truncatedByCap = false;
         _cachedInvSnapshot.items.clear();
         _cachedInvSnapshot.kindByCleanUpper.clear();
+        _cachedInvSnapshot.conditionByCleanUpper.clear();
         _cachedMerge = {};
         _customQcActive.store(false, std::memory_order_release);
         _customQcTakeEnabled.store(false, std::memory_order_release);
@@ -4794,6 +6022,39 @@ namespace HUDController
             _suppressedReadyHeld.store(false, std::memory_order_release);
             _customQcTakeLatched.store(false, std::memory_order_release);
             _blockOrphanSecondaryActivate.store(false, std::memory_order_release);
+            _tpAssistActive.store(false, std::memory_order_release);
+            _tpAssistActivateRequested.store(false, std::memory_order_release);
+            _tpAssistActivateLatched.store(false, std::memory_order_release);
+            _holdPrimaryRequired.store(false, std::memory_order_release);
+            _holdSecondaryRequired.store(false, std::memory_order_release);
+            _holdPrimaryUseSyntheticTap.store(false, std::memory_order_release);
+            _holdInQuickContainer.store(false, std::memory_order_release);
+            _holdTargetKey.store(0, std::memory_order_release);
+            _holdPrimaryProgress.store(0.0f, std::memory_order_release);
+            _holdSecondaryProgress.store(0.0f, std::memory_order_release);
+            _holdPrimaryActivateRequested.store(false, std::memory_order_release);
+            _holdPrimaryActive.store(false, std::memory_order_release);
+            _holdPrimaryCompleted.store(false, std::memory_order_release);
+            _holdSecondaryActive.store(false, std::memory_order_release);
+            _holdSecondaryCompleted.store(false, std::memory_order_release);
+            _holdWaterTapStage.store(0, std::memory_order_release);
+            _holdWaterTapTriggerMs.store(0, std::memory_order_relaxed);
+            _holdWaterQueueHead.store(nullptr, std::memory_order_release);
+            _holdSecTapStage.store(0, std::memory_order_release);
+            _holdSecTapTriggerMs.store(0, std::memory_order_relaxed);
+            _holdSecQueueHead.store(nullptr, std::memory_order_release);
+            _tpAssistLockedFormID = 0;
+            _tpAssistLockStartMs = 0;
+            _postHoldGuardArmed.store(false, std::memory_order_release);
+            _postHoldGuardMenuObserved.store(false, std::memory_order_release);
+            _postHoldGuardWaitRelease.store(false, std::memory_order_release);
+            _postHoldGuardTriggerMs.store(0, std::memory_order_relaxed);
+            _postHoldGuardMenuOpenMs.store(0, std::memory_order_relaxed);
+            _postHoldGuardReleaseMs.store(0, std::memory_order_relaxed);
+            _postHoldGuardDevice.store(0xFFFFFFFFu, std::memory_order_relaxed);
+            _postHoldGuardIdCode.store(0xFFFFFFFFu, std::memory_order_relaxed);
+            _featuredExamineOpenMs.store(0, std::memory_order_release);
+            _featuredExamineWaitRelease.store(false, std::memory_order_release);
             _inputResetEpoch.fetch_add(1, std::memory_order_acq_rel);
             _state.Reset();
             _qcState.Reset();
@@ -4805,6 +6066,9 @@ namespace HUDController
             _cachedAnchorRoot3D = nullptr;
             _cachedAnchorRefScale = 0;
             _lastQuickLootActiveMs = 0;
+            _tpAssistRefHandle.reset();
+            _tpAssistLastScanMs = 0;
+            _lastAimingMs.store(0, std::memory_order_release);
             RestoreCompanionEngineSettings();
             RestoreGrabDelaySetting();
             InvalidateQuickContainerCacheInternal();
@@ -4827,6 +6091,17 @@ namespace HUDController
         _customQcTakeEnabled.store(false, std::memory_order_release);
         _customQcPendingScrollDelta.store(0, std::memory_order_release);
         _customQcTakeRequested.store(false, std::memory_order_release);
+        _tpAssistActive.store(false, std::memory_order_release);
+        _tpAssistActivateRequested.store(false, std::memory_order_release);
+        _holdPrimaryRequired.store(false, std::memory_order_release);
+        _holdSecondaryRequired.store(false, std::memory_order_release);
+        _holdPrimaryUseSyntheticTap.store(false, std::memory_order_release);
+        _holdInQuickContainer.store(false, std::memory_order_release);
+        _holdTargetKey.store(0, std::memory_order_release);
+        _lastAimingMs.store(0, std::memory_order_release);
+        _holdPrimaryActivateRequested.store(false, std::memory_order_release);
+        _holdPrimaryProgress.store(0.0f, std::memory_order_release);
+        _holdSecondaryProgress.store(0.0f, std::memory_order_release);
         _hoverTargetKey.store(0, std::memory_order_relaxed);
         _hoverFirstSeenMs.store(0, std::memory_order_relaxed);
         _qcHoverItemHash.store(0, std::memory_order_relaxed);
@@ -4842,6 +6117,17 @@ namespace HUDController
         return _overlaySnapshot;
     }
 
+    float Controller::GetLiveHoldProgress(std::size_t a_actionIdx) const noexcept
+    {
+        if (a_actionIdx == 0) {
+            return std::clamp(_holdPrimaryProgress.load(std::memory_order_acquire), 0.0f, 1.0f);
+        }
+        if (a_actionIdx == 1) {
+            return std::clamp(_holdSecondaryProgress.load(std::memory_order_acquire), 0.0f, 1.0f);
+        }
+        return 0.0f;
+    }
+
     void Controller::ResetState()
     {
         _pendingReset.store(true, std::memory_order_release);
@@ -4852,6 +6138,20 @@ namespace HUDController
         _customQcTakeDevice.store(0xFFFFFFFFu, std::memory_order_relaxed);
         _customQcTakeIdCode.store(0xFFFFFFFFu, std::memory_order_relaxed);
         _customQcTakeLatched.store(false, std::memory_order_release);
+        _tpAssistActivateLatched.store(false, std::memory_order_release);
+        _holdPrimaryActive.store(false, std::memory_order_release);
+        _holdPrimaryCompleted.store(false, std::memory_order_release);
+        _holdSecondaryActive.store(false, std::memory_order_release);
+        _holdSecondaryCompleted.store(false, std::memory_order_release);
+        _holdWaterTapStage.store(0, std::memory_order_release);
+        _holdWaterTapTriggerMs.store(0, std::memory_order_relaxed);
+        _holdWaterQueueHead.store(nullptr, std::memory_order_release);
+        _holdSecTapStage.store(0, std::memory_order_release);
+        _holdSecTapTriggerMs.store(0, std::memory_order_relaxed);
+        _holdSecQueueHead.store(nullptr, std::memory_order_release);
+        _postHoldGuardArmed.store(false, std::memory_order_release);
+        _featuredExamineOpenMs.store(0, std::memory_order_release);
+        _featuredExamineWaitRelease.store(false, std::memory_order_release);
         ClearOverlaySnapshot();
         _inputResetEpoch.fetch_add(1, std::memory_order_acq_rel);
     }
@@ -4876,6 +6176,9 @@ namespace HUDController
             a_item.isEquipped == _cachedQcItemEquipped &&
             a_item.isLegendary == _cachedQcItemLegendary &&
             a_item.isFavorite == _cachedQcItemFavorite &&
+            a_item.stackSignature == _cachedQcItemStackSig &&
+            a_item.hasCondition == _cachedQcItemHasCondition &&
+            (!a_item.hasCondition || std::fabs(a_item.conditionPercent - _cachedQcItemConditionPercent) < 0.25f) &&
             a_item.name == _cachedQcItemName &&
             (nowMs - _cachedQcItemTimeMs) < 200) {
             a_outMeta = _cachedQcItemMeta;
@@ -5001,6 +6304,9 @@ namespace HUDController
             _cachedQcItemEquipped = a_item.isEquipped;
             _cachedQcItemLegendary = a_item.isLegendary;
             _cachedQcItemFavorite = a_item.isFavorite;
+            _cachedQcItemStackSig = a_item.stackSignature;
+            _cachedQcItemHasCondition = a_item.hasCondition;
+            _cachedQcItemConditionPercent = a_item.conditionPercent;
             _cachedQcItemTimeMs = nowMs;
             _cachedQcItemMeta = resolvedMeta;
             _cachedQcItemHasMeta = true;
@@ -5036,6 +6342,7 @@ namespace HUDController
             RE::BSAutoWriteLock lock{ a_invOwner->inventoryList->rwLock };
             const std::size_t liveListSize = a_invOwner->inventoryList->data.size();
             std::size_t liveStackCount = 0;
+            std::size_t liveEquippedCount = 0;
             std::uint64_t liveCountSum = 0;
             std::size_t probedItems = 0;
             for (const auto& invItem : a_invOwner->inventoryList->data) {
@@ -5044,6 +6351,9 @@ namespace HUDController
                 }
                 for (auto* st = invItem.stackData.get(); st; st = st->nextStack.get()) {
                     ++liveStackCount;
+                    if (st->IsEquipped()) {
+                        ++liveEquippedCount;
+                    }
                     liveCountSum += st->GetCount();
                 }
             }
@@ -5053,6 +6363,7 @@ namespace HUDController
                 a_skipEquipped == _cachedInvSnapshot.skipEquipped &&
                 liveListSize == _cachedInvSnapshot.rawListSize &&
                 liveStackCount == _cachedInvSnapshot.rawStackCount &&
+                liveEquippedCount == _cachedInvSnapshot.rawEquippedStackCount &&
                 liveCountSum == _cachedInvSnapshot.rawTotalCountSum &&
                 (nowMs - _cachedInvSnapshot.timestampMs) < 250) {
                 return _cachedInvSnapshot;
@@ -5060,6 +6371,7 @@ namespace HUDController
 
             nextSnap.rawListSize = liveListSize;
             nextSnap.rawStackCount = liveStackCount;
+            nextSnap.rawEquippedStackCount = liveEquippedCount;
             nextSnap.rawTotalCountSum = liveCountSum;
             nextSnap.items.reserve(std::min(liveListSize, kMaxExpandedInventoryItems));
 
@@ -5138,17 +6450,30 @@ namespace HUDController
                         continue;
                     }
 
-                    if (nextSnap.kindByCleanUpper.size() < 2048) {
-                        const std::string cleanKey = CleanUpperKey(displayName);
-                        if (!cleanKey.empty()) {
-                            nextSnap.kindByCleanUpper.try_emplace(cleanKey, kind);
-                        }
+                    const std::string cleanKey = CleanUpperKey(displayName);
+                    if (!cleanKey.empty() && nextSnap.kindByCleanUpper.size() < 2048) {
+                        nextSnap.kindByCleanUpper.try_emplace(cleanKey, kind);
                     }
 
                     bool legendary = false;
                     const std::uint64_t stackSig = ComputeStackSignature(stackExtra, stackIdx, legendary);
                     const bool questItem = IsStackQuestObject(stackExtra);
-                    const bool isTempStack = stack->flags.all(RE::BGSInventoryItem::Stack::Flag::kTemporary);
+                    const bool rawTempFlag = stack->flags.all(RE::BGSInventoryItem::Stack::Flag::kTemporary);
+                    bool isDroppedWorldProxy = false;
+                    if (rawTempFlag && stackExtra) {
+                        if (auto* refHandles = stackExtra->GetByType<RE::ExtraReferenceHandles>()) {
+                            auto origPtr = refHandles->originalRef ? refHandles->originalRef.get() : RE::NiPointer<RE::TESObjectREFR>{};
+                            if (!origPtr || origPtr->IsDeleted() || IsRefDisabled(origPtr.get())) {
+                                continue; // Skip orphaned/deleted world proxy stack that cannot be picked up
+                            }
+                            isDroppedWorldProxy = true;
+                        }
+                    }
+
+                    const auto condRes = TargetInfo::ResolveObjectCondition(invItem.object, stackExtra, kind, instData);
+                    if (condRes.hasCondition && !cleanKey.empty() && nextSnap.conditionByCleanUpper.size() < 2048) {
+                        nextSnap.conditionByCleanUpper.try_emplace(cleanKey, condRes.conditionPercent);
+                    }
 
                     const std::int32_t rawValue = RE::TESValueForm::GetFormValue(invItem.object, instData);
                     const std::uint32_t itemValue = (rawValue > 0) ? static_cast<std::uint32_t>(rawValue) : 0u;
@@ -5170,7 +6495,9 @@ namespace HUDController
                     entry.quickLootCategory = qcCategory;
                     entry.isQuestItem = questItem;
                     entry.isCaps = isCaps;
-                    entry.isTemporary = isTempStack;
+                    entry.isTemporary = isDroppedWorldProxy;
+                    entry.hasCondition = condRes.hasCondition;
+                    entry.conditionPercent = condRes.conditionPercent;
                     itemStacks.push_back(std::move(entry));
                 }
 
@@ -5190,6 +6517,27 @@ namespace HUDController
         return _cachedInvSnapshot;
     }
 
+    std::uint64_t Controller::CountBoundObjectInInventory(
+        RE::TESObjectREFR* a_invOwner,
+        std::uint32_t a_formID) const
+    {
+        if (!a_invOwner || !a_invOwner->inventoryList || a_formID == 0) {
+            return 0;
+        }
+        std::uint64_t total = 0;
+        RE::BSAutoWriteLock lock{ a_invOwner->inventoryList->rwLock };
+        for (const auto& invItem : a_invOwner->inventoryList->data) {
+            if (!invItem.object || invItem.object->IsDeleted() ||
+                invItem.object->GetFormID() != a_formID) {
+                continue;
+            }
+            for (auto* stack = invItem.stackData.get(); stack; stack = stack->nextStack.get()) {
+                total += stack->GetCount();
+            }
+        }
+        return total;
+    }
+
     bool Controller::ExecuteCustomQuickLootTake(
         RE::TESObjectREFR* a_invOwner,
         RE::PlayerCharacter* a_player,
@@ -5206,9 +6554,18 @@ namespace HUDController
         RE::NiPointer<RE::TESObjectREFR> droppedRef;
         RE::ObjectRefHandle droppedOrigHandle{};
         std::vector<std::uint32_t> stackIndices;
+        std::vector<std::pair<std::uint32_t, const RE::TBO_InstanceData*>> equippedStacks;
         std::uint64_t totalCount = 0;
 
-        {
+        auto collectTargetStacks = [&](bool a_allowAnyEquipState) {
+            boundObj = nullptr;
+            boundFormID = 0;
+            droppedRef.reset();
+            droppedOrigHandle.reset();
+            stackIndices.clear();
+            equippedStacks.clear();
+            totalCount = 0;
+
             RE::BSAutoWriteLock lock{ a_invOwner->inventoryList->rwLock };
 
             for (const auto& invItem : a_invOwner->inventoryList->data) {
@@ -5228,6 +6585,7 @@ namespace HUDController
                     (objFormType == RE::ENUM_FORM_ID::kWEAP || objFormType == RE::ENUM_FORM_ID::kARMO);
 
                 std::vector<std::uint32_t> candidateIndices;
+                std::vector<std::pair<std::uint32_t, const RE::TBO_InstanceData*>> candidateEquipped;
                 std::uint64_t candidateTotal = 0;
                 RE::NiPointer<RE::TESObjectREFR> candidateDroppedRef;
                 RE::ObjectRefHandle candidateDroppedOrigHandle{};
@@ -5239,18 +6597,22 @@ namespace HUDController
                         continue;
                     }
                     const bool equipped = stack->IsEquipped();
-                    if (equipped != a_target.isEquipped) {
+                    if (!a_allowAnyEquipState && equipped != a_target.isEquipped) {
                         continue;
                     }
                     if (stack->flags.all(RE::BGSInventoryItem::Stack::Flag::kEquipStateLocked)) {
                         continue;
                     }
-                    const bool isTempStack = stack->flags.all(RE::BGSInventoryItem::Stack::Flag::kTemporary);
-                    if (isTempStack != a_target.isTemporary) {
+
+                    RE::ExtraDataList* stackExtra = stack->extra.get();
+                    const bool hasOrigRefHandle =
+                        stack->flags.all(RE::BGSInventoryItem::Stack::Flag::kTemporary) &&
+                        stackExtra != nullptr &&
+                        stackExtra->GetByType<RE::ExtraReferenceHandles>() != nullptr;
+                    if (hasOrigRefHandle != a_target.isTemporary) {
                         continue;
                     }
 
-                    RE::ExtraDataList* stackExtra = stack->extra.get();
                     const RE::TBO_InstanceData* instData = ResolveItemInstanceData(invItem.object, stackExtra);
                     if (!invItem.object->GetPlayable(instData)) {
                         continue;
@@ -5290,25 +6652,26 @@ namespace HUDController
                         continue;
                     }
 
-                    if (isTempStack) {
-                        if (stackExtra) {
-                            if (auto* refHandles = stackExtra->GetByType<RE::ExtraReferenceHandles>();
-                                refHandles && refHandles->originalRef) {
-                                auto refPtr = refHandles->originalRef.get();
-                                if (refPtr && !refPtr->IsDeleted()) {
-                                    candidateDroppedRef = std::move(refPtr);
-                                    candidateDroppedOrigHandle = refHandles->originalRef;
-                                    candidateTotal = cnt;
-                                    candidateIndices.clear();
-                                    candidateIndices.push_back(stackIdx);
-                                    break;
-                                }
+                    if (hasOrigRefHandle) {
+                        if (auto* refHandles = stackExtra->GetByType<RE::ExtraReferenceHandles>();
+                            refHandles && refHandles->originalRef) {
+                            auto refPtr = refHandles->originalRef.get();
+                            if (refPtr && !refPtr->IsDeleted() && !IsRefDisabled(refPtr.get())) {
+                                candidateDroppedRef = std::move(refPtr);
+                                candidateDroppedOrigHandle = refHandles->originalRef;
+                                candidateTotal = cnt;
+                                candidateIndices.clear();
+                                candidateIndices.push_back(stackIdx);
+                                break;
                             }
                         }
-                        continue; // Never materialize stale/orphaned kTemporary proxy stack into player inventory
+                        continue;
                     }
 
                     candidateIndices.push_back(stackIdx);
+                    if (equipped) {
+                        candidateEquipped.emplace_back(stackIdx, instData);
+                    }
                     candidateTotal += cnt;
                 }
 
@@ -5316,24 +6679,39 @@ namespace HUDController
                     boundObj = invItem.object;
                     boundFormID = itemFormID;
                     stackIndices = std::move(candidateIndices);
+                    equippedStacks = std::move(candidateEquipped);
                     totalCount = candidateTotal;
                     droppedRef = std::move(candidateDroppedRef);
                     droppedOrigHandle = candidateDroppedOrigHandle;
                     break;
                 }
             }
-        }
+        };
+
+        collectTargetStacks(false);
 
         if (!boundObj || totalCount == 0) {
+            const std::int64_t nowMs = SteadyNowMs();
+            const std::int64_t prevWarn = _diagQcTakeFailLastLogMs.load(std::memory_order_relaxed);
+            if ((nowMs - prevWarn) >= 1000) {
+                _diagQcTakeFailLastLogMs.store(nowMs, std::memory_order_relaxed);
+                logger::warn(
+                    "CustomQuickLoot take match failed: owner={:08X} base={:08X} '{}' eq={} temp={} mode={}",
+                    a_invOwner->GetFormID(),
+                    a_target.baseFormID,
+                    a_target.name,
+                    a_target.isEquipped,
+                    a_target.isTemporary,
+                    static_cast<int>(a_mode));
+            }
             return false;
         }
 
-        const std::int32_t takeCount = static_cast<std::int32_t>(std::min<std::uint64_t>(
-            totalCount,
-            static_cast<std::uint64_t>(std::numeric_limits<std::int32_t>::max())));
-
         if (droppedRef) {
-            a_player->PickUpObject(droppedRef.get(), takeCount, true);
+            const std::uint64_t beforeProxy = CountBoundObjectInInventory(a_invOwner, boundFormID);
+            a_player->PickUpObject(droppedRef.get(),
+                static_cast<std::int32_t>(std::min<std::uint64_t>(totalCount, std::numeric_limits<std::int32_t>::max())),
+                true);
 
             bool foundResidualTemp = false;
             std::uint32_t cleanupIdx = 0;
@@ -5377,22 +6755,95 @@ namespace HUDController
                 cleanupData.reason = RE::ITEM_REMOVE_REASON::kNone;
                 (void)a_invOwner->RemoveItem(cleanupData);
             }
-            return true;
+            const std::uint64_t afterProxy = CountBoundObjectInInventory(a_invOwner, boundFormID);
+            return afterProxy < beforeProxy || !foundResidualTemp;
         }
 
-        if (stackIndices.empty()) {
+        // Deadlock-safe: rwLock is NOT held here. Unequip equipped stacks on Actors first so RemoveItem succeeds.
+        if (!equippedStacks.empty()) {
+            if (auto* ownerActor = a_invOwner->As<RE::Actor>()) {
+                if (auto* eqMgr = RE::ActorEquipManager::GetSingleton()) {
+                    for (const auto& [eqIdx, eqInst] : equippedStacks) {
+                        RE::BGSObjectInstance objInst(boundObj, const_cast<RE::TBO_InstanceData*>(eqInst));
+                        (void)eqMgr->UnequipObject(
+                            ownerActor,
+                            &objInst,
+                            0,
+                            nullptr,
+                            eqIdx,
+                            false,
+                            true,
+                            false,
+                            true,
+                            nullptr);
+                    }
+                    // Unequipping can merge/shift stacks, so refresh indices safely under a fresh lock
+                    RE::TESBoundObject* prevObj = boundObj;
+                    std::uint32_t prevFormID = boundFormID;
+                    std::uint64_t prevTotal = totalCount;
+                    collectTargetStacks(true);
+                    if (!boundObj) {
+                        boundObj = prevObj;
+                        boundFormID = prevFormID;
+                        totalCount = prevTotal;
+                        stackIndices.clear();
+                    } else {
+                        totalCount = std::min(totalCount, prevTotal);
+                    }
+                }
+            }
+        }
+
+        if (!boundObj || totalCount == 0) {
             return false;
         }
 
-        RE::TESObjectREFR::RemoveItemData data(boundObj, takeCount);
-        for (const std::uint32_t idx : stackIndices) {
-            data.stackData.push_back(idx);
-        }
-        data.a_otherContainer = a_player;
-        data.reason = (a_mode == RE::QuickContainerMode::kTeammate)
+        const std::int32_t takeCount = static_cast<std::int32_t>(std::min<std::uint64_t>(
+            totalCount,
+            static_cast<std::uint64_t>(std::numeric_limits<std::int32_t>::max())));
+        const auto removeReason = (a_mode == RE::QuickContainerMode::kTeammate)
             ? RE::ITEM_REMOVE_REASON::kStoreTeammate
             : RE::ITEM_REMOVE_REASON::kStoreContainer;
-        (void)a_invOwner->RemoveItem(data);
+
+        const std::uint64_t countBefore = CountBoundObjectInInventory(a_invOwner, boundFormID);
+        if (!stackIndices.empty()) {
+            RE::TESObjectREFR::RemoveItemData data(boundObj, takeCount);
+            for (const std::uint32_t idx : stackIndices) {
+                data.stackData.push_back(idx);
+            }
+            data.a_otherContainer = a_player;
+            data.reason = removeReason;
+            (void)a_invOwner->RemoveItem(data);
+        }
+        std::uint64_t countAfter = CountBoundObjectInInventory(a_invOwner, boundFormID);
+
+        if (countAfter >= countBefore && countBefore > 0 &&
+            (countBefore <= static_cast<std::uint64_t>(takeCount) || stackIndices.empty())) {
+            RE::TESObjectREFR::RemoveItemData fallbackData(boundObj, takeCount);
+            fallbackData.a_otherContainer = a_player;
+            fallbackData.reason = removeReason;
+            (void)a_invOwner->RemoveItem(fallbackData);
+            countAfter = CountBoundObjectInInventory(a_invOwner, boundFormID);
+        }
+
+        if (countAfter >= countBefore && countBefore > 0) {
+            const std::int64_t nowMs = SteadyNowMs();
+            const std::int64_t prevWarn = _diagQcTakeFailLastLogMs.load(std::memory_order_relaxed);
+            if ((nowMs - prevWarn) >= 1000) {
+                _diagQcTakeFailLastLogMs.store(nowMs, std::memory_order_relaxed);
+                logger::warn(
+                    "CustomQuickLoot take did not reduce count: owner={:08X} item={:08X} '{}' eq={} mode={} before={} after={}",
+                    a_invOwner->GetFormID(),
+                    boundFormID,
+                    a_target.name,
+                    a_target.isEquipped,
+                    static_cast<int>(a_mode),
+                    countBefore,
+                    countAfter);
+            }
+            return false;
+        }
+
         a_player->PlayPickUpSound(boundObj, true, false);
         return true;
     }
@@ -5553,6 +7004,15 @@ namespace HUDController
             if (!Config::GetSingleton().HasUnsavedChanges()) {
                 Config::GetSingleton().LoadAll();
             }
+        } else if (a_event.menuName == "ExamineMenu"sv) {
+            if (a_event.opening) {
+                _featuredExamineOpenMs.store(SteadyNowMs(), std::memory_order_release);
+                _featuredExamineWaitRelease.store(true, std::memory_order_release);
+                ClearOverlaySnapshot();
+            } else {
+                _featuredExamineOpenMs.store(0, std::memory_order_release);
+                _featuredExamineWaitRelease.store(false, std::memory_order_release);
+            }
         } else if (a_event.opening) {
             if (a_event.menuName == "DialogueMenu"sv ||
                 a_event.menuName == "VATSMenu"sv ||
@@ -5562,7 +7022,6 @@ namespace HUDController
                 a_event.menuName == "PipboyMenu"sv ||
                 a_event.menuName == "ContainerMenu"sv ||
                 a_event.menuName == "BarterMenu"sv ||
-                a_event.menuName == "ExamineMenu"sv ||
                 a_event.menuName == "PauseMenu"sv ||
                 a_event.menuName == "LoadingMenu"sv ||
                 a_event.menuName == "MainMenu"sv ||
@@ -5598,6 +7057,398 @@ namespace HUDController
         }
     }
 
+    namespace
+    {
+        [[nodiscard]] RE::NiPoint3 ResolvePlayerEyeOrigin(RE::PlayerCharacter* a_player) noexcept
+        {
+            const RE::NiPoint3 pPos = a_player->GetPosition();
+            if (auto* root = a_player->Get3D()) {
+                if (auto* head = root->GetObjectByName("HEAD"sv)) {
+                    return head->world.translate;
+                }
+                if (auto* spine = root->GetObjectByName("SPINE2"sv)) {
+                    return spine->world.translate;
+                }
+            }
+            const float eyeZ = (a_player->eyeHeight > 10.0f && a_player->eyeHeight < 200.0f) ? a_player->eyeHeight : 95.0f;
+            const float zMul = a_player->IsSneaking() ? 0.62f : 0.80f;
+            return RE::NiPoint3{ pPos.x, pPos.y, pPos.z + eyeZ * zMul };
+        }
+
+        [[nodiscard]] bool HasClearLineOfSightToRef(
+            RE::PlayerCharacter* a_player,
+            RE::TESObjectCELL* a_cell,
+            RE::TESObjectREFR* a_targetRef,
+            const RE::NiPoint3& a_rayOrigin,
+            const RE::NiPoint3& a_targetPt,
+            bool a_allowWallRecess,
+            bool& a_outHitSolidWall) noexcept
+        {
+            a_outHitSolidWall = false;
+            if (!a_player || !a_cell || !a_targetRef) {
+                return true;
+            }
+            RE::NiPoint3 delta{
+                a_targetPt.x - a_rayOrigin.x,
+                a_targetPt.y - a_rayOrigin.y,
+                a_targetPt.z - a_rayOrigin.z
+            };
+            const float rayDist = delta.Length();
+            if (!std::isfinite(rayDist) || rayDist < 2.0f) {
+                return true;
+            }
+            RE::NiPoint3 dir{ delta.x / rayDist, delta.y / rayDist, delta.z / rayDist };
+
+            auto evalPickLayer = [&](std::uint32_t a_layerFilter, bool& a_outHasHit, bool& a_outHitTarget, float& a_outOrigFrac, bool& a_outSolid) {
+                RE::NiPoint3 curStart = a_rayOrigin;
+                float remainingLen = rayDist;
+                float traveled = 0.0f;
+                for (int attempt = 0; attempt < 2; ++attempt) {
+                    if (remainingLen < 2.0f) {
+                        a_outHasHit = false;
+                        a_outHitTarget = false;
+                        a_outOrigFrac = 1.0f;
+                        a_outSolid = false;
+                        return;
+                    }
+                    RE::bhkPickData pickData;
+                    RE::NiPoint3 start = curStart;
+                    RE::NiPoint3 aimVec = dir;
+                    pickData.InitializeWithCollisionFilter(a_layerFilter, start, aimVec, remainingLen);
+                    (void)a_cell->Pick(pickData);
+                    if (!pickData.HasHit()) {
+                        a_outHasHit = false;
+                        a_outHitTarget = false;
+                        a_outOrigFrac = 1.0f;
+                        a_outSolid = false;
+                        return;
+                    }
+                    const float segFrac = std::clamp(pickData.GetHitFraction(), 0.0f, 1.0f);
+                    bool hitPlayer = false;
+                    bool hitTarget = false;
+                    if (auto* hitObj = pickData.GetNiAVObject()) {
+                        if (auto* hitRef = AnchorManager::ResolveRefFrom3D(hitObj)) {
+                            hitPlayer = (hitRef == a_player);
+                            hitTarget = (hitRef == a_targetRef);
+                        }
+                    }
+                    if (hitPlayer && attempt == 0) {
+                        const float advance = segFrac * remainingLen + 4.0f;
+                        traveled += advance;
+                        remainingLen = rayDist - traveled;
+                        curStart = RE::NiPoint3{
+                            a_rayOrigin.x + dir.x * traveled,
+                            a_rayOrigin.y + dir.y * traveled,
+                            a_rayOrigin.z + dir.z * traveled
+                        };
+                        continue;
+                    }
+                    a_outHasHit = true;
+                    a_outHitTarget = hitTarget;
+                    a_outOrigFrac = std::clamp((traveled + segFrac * remainingLen) / rayDist, 0.0f, 1.0f);
+                    std::uint32_t filterInfo = pickData.result.hitBodyInfo.m_shapeCollisionFilterInfo.storage;
+                    if (filterInfo == 0) {
+                        filterInfo = pickData.GetHitCollisionFilterInfo();
+                    }
+                    const auto hitLayer = static_cast<std::uint8_t>(filterInfo & 0x7Fu);
+                    a_outSolid = (!hitTarget && !hitPlayer && IsSolidWallCollisionLayer(hitLayer));
+                    return;
+                }
+                a_outHasHit = false;
+                a_outHitTarget = false;
+                a_outOrigFrac = 1.0f;
+                a_outSolid = false;
+            };
+
+            bool hasHit = false;
+            bool hitTarget = false;
+            float hitFrac = 1.0f;
+            bool hitSolid = false;
+            evalPickLayer(static_cast<std::uint32_t>(RE::COL_LAYER::kItemPicker), hasHit, hitTarget, hitFrac, hitSolid);
+
+            if (!hasHit || (!hitSolid && !hitTarget)) {
+                bool losHasHit = false;
+                bool losHitTarget = false;
+                float losFrac = 1.0f;
+                bool losSolid = false;
+                evalPickLayer(static_cast<std::uint32_t>(RE::COL_LAYER::kLOS), losHasHit, losHitTarget, losFrac, losSolid);
+                if (losHasHit && (losSolid || !hasHit || losHitTarget)) {
+                    hasHit = losHasHit;
+                    hitTarget = losHitTarget;
+                    hitFrac = losFrac;
+                    hitSolid = losSolid;
+                }
+            }
+
+            a_outHitSolidWall = hitSolid;
+            const float targetDeltaZ = a_targetPt.z - a_player->GetPosition().z;
+            return IsThirdPersonAssistLosClear(
+                hasHit, hitTarget, hitFrac, rayDist, targetDeltaZ, hitSolid, a_allowWallRecess);
+        }
+    }
+
+    RE::NiPointer<RE::TESObjectREFR> Controller::FindThirdPersonAssistTarget(
+        RE::PlayerCharacter* a_player,
+        RE::TESObjectREFR* a_crosshairRef,
+        bool a_looseItemsOnly,
+        const ConfigData& a_cfg,
+        RE::NiCamera* a_cam)
+    {
+        if (!a_player || !a_cfg.tpAssistEnabled) {
+            return nullptr;
+        }
+        auto* cell = a_player->GetParentCell();
+        if (!cell) {
+            return nullptr;
+        }
+
+        const float baseMaxDist = std::clamp(a_cfg.tpAssistMaxDistance, 60.0f, 250.0f);
+        const float maxDist = a_looseItemsOnly ? std::min(baseMaxDist, 85.0f) : baseMaxDist;
+        const float maxDistSq = maxDist * maxDist;
+        const float halfRad = std::clamp(a_cfg.tpAssistConeDegrees, 20.0f, 90.0f) * (3.14159265f / 180.0f);
+        const float minCos = std::cos(halfRad);
+
+        const RE::NiPoint3 playerPos = a_player->GetPosition();
+        const RE::NiPoint3 rayOrigin = ResolvePlayerEyeOrigin(a_player);
+        const float heading = a_player->data.angle.z;
+        const float fwdX = std::sin(heading);
+        const float fwdY = std::cos(heading);
+
+        const std::uint32_t currentAssistID =
+            _tpAssistRefHandle ? ([&]() { auto p = _tpAssistRefHandle.get(); return p ? p->GetFormID() : 0u; })() : 0u;
+        const std::uint32_t crosshairID = a_crosshairRef ? a_crosshairRef->GetFormID() : 0u;
+
+        std::vector<RE::NiPointer<RE::TESObjectREFR>> rawCandidates;
+        rawCandidates.reserve(32);
+        {
+            RE::BSAutoLock lock{ cell->spinLock };
+            for (const auto& refPtr : cell->references) {
+                auto* ref = refPtr.get();
+                if (!ref || ref == a_player || ref->IsDeleted() || ref->predestroyed ||
+                    IsRefDisabled(ref) || (ref->formFlags & (1u << 12)) != 0u) {
+                    continue;
+                }
+                auto* base = ref->GetObjectReference();
+                if (!base || base->IsMarker() || base->IsOcclusionMarker() || base->GetDangerous()) {
+                    continue;
+                }
+                const auto formType = base->GetFormType();
+                const bool whitelistedType =
+                    (formType == RE::ENUM_FORM_ID::kWEAP ||
+                     formType == RE::ENUM_FORM_ID::kARMO ||
+                     formType == RE::ENUM_FORM_ID::kALCH ||
+                     formType == RE::ENUM_FORM_ID::kAMMO ||
+                     formType == RE::ENUM_FORM_ID::kMISC ||
+                     formType == RE::ENUM_FORM_ID::kKEYM ||
+                     formType == RE::ENUM_FORM_ID::kBOOK ||
+                     formType == RE::ENUM_FORM_ID::kNOTE ||
+                     formType == RE::ENUM_FORM_ID::kOMOD ||
+                     formType == RE::ENUM_FORM_ID::kCONT ||
+                     formType == RE::ENUM_FORM_ID::kDOOR ||
+                     formType == RE::ENUM_FORM_ID::kFURN ||
+                     formType == RE::ENUM_FORM_ID::kTERM ||
+                     formType == RE::ENUM_FORM_ID::kFLOR ||
+                     formType == RE::ENUM_FORM_ID::kTREE ||
+                     formType == RE::ENUM_FORM_ID::kACTI);
+                if (!whitelistedType) {
+                    continue;
+                }
+                if ((formType == RE::ENUM_FORM_ID::kFLOR || formType == RE::ENUM_FORM_ID::kTREE) &&
+                    (ref->formFlags & (1u << 13)) != 0u) {
+                    continue;
+                }
+                const auto cat = AnchorManager::ClassifyReference(ref);
+                if (cat == AnchorManager::TargetCategory::kActor) {
+                    continue;
+                }
+                if (a_looseItemsOnly &&
+                    (cat != AnchorManager::TargetCategory::kItem ||
+                     formType == RE::ENUM_FORM_ID::kACTI)) {
+                    continue;
+                }
+                const bool catEnabled =
+                    (cat == AnchorManager::TargetCategory::kItem && a_cfg.tpAssistItems) ||
+                    (cat == AnchorManager::TargetCategory::kDoor && a_cfg.tpAssistDoors) ||
+                    (cat == AnchorManager::TargetCategory::kFurnitureTerminal && a_cfg.tpAssistFurniture) ||
+                    (cat == AnchorManager::TargetCategory::kContainer && a_cfg.tpAssistContainers);
+                if (!catEnabled) {
+                    continue;
+                }
+                if (cat == AnchorManager::TargetCategory::kItem &&
+                    formType == RE::ENUM_FORM_ID::kACTI &&
+                    !a_cfg.tpAssistDoors) {
+                    continue;
+                }
+                const RE::NiPoint3 rPos = ref->GetPosition();
+                const float dx = rPos.x - playerPos.x;
+                const float dy = rPos.y - playerPos.y;
+                const float dz = rPos.z - playerPos.z;
+                if (dz < -30.0f || dz > 140.0f) {
+                    continue;
+                }
+                const float distSq = dx * dx + dy * dy + dz * dz;
+                if (distSq > maxDistSq) {
+                    continue;
+                }
+                const float hLenRaw = std::hypot(dx, dy);
+                if (hLenRaw > 45.0f && ((dx * fwdX + dy * fwdY) / hLenRaw) < (minCos - 0.25f)) {
+                    continue;
+                }
+                rawCandidates.push_back(refPtr);
+                if (rawCandidates.size() >= 256) {
+                    break;
+                }
+            }
+        }
+
+        struct ScoredRef
+        {
+            RE::NiPointer<RE::TESObjectREFR> ref;
+            RE::NiPoint3 targetPt{};
+            float score{ -1.0f };
+        };
+        std::vector<ScoredRef> scored;
+        scored.reserve(rawCandidates.size());
+
+        ConfigData zeroOffsetCfg = a_cfg;
+        zeroOffsetCfg.doorOffset = {};
+        zeroOffsetCfg.npcOffset = {};
+        zeroOffsetCfg.containerOffset = {};
+        zeroOffsetCfg.itemOffset = {};
+        zeroOffsetCfg.furnitureOffset = {};
+
+        for (auto& refPtr : rawCandidates) {
+            auto* ref = refPtr.get();
+            if (!ref) {
+                continue;
+            }
+            auto* root3D = ref->Get3D();
+            if (!root3D || root3D->GetAppCulled()) {
+                continue;
+            }
+            if (crosshairID != 0 && ref->GetFormID() == crosshairID) {
+                continue;
+            }
+            auto* base = ref->GetObjectReference();
+            if (!base) {
+                continue;
+            }
+            RE::BSStringT<char> actText;
+            if (!base->GetActivateText(ref, actText) || actText.empty()) {
+                continue;
+            }
+
+            std::string visibleName;
+            if (auto* extraList = ref->extraList.get()) {
+                if (auto* textExtra = extraList->GetByType<RE::ExtraTextDisplayData>()) {
+                    if (!textExtra->displayName.empty() && !TrimWhitespace(textExtra->displayName.c_str()).empty()) {
+                        visibleName = textExtra->displayName.c_str();
+                    } else {
+                        const auto& resolvedName = textExtra->GetDisplayName(base);
+                        if (!resolvedName.empty() && !TrimWhitespace(resolvedName.c_str()).empty()) {
+                            visibleName = resolvedName.c_str();
+                        }
+                    }
+                }
+            }
+            if (visibleName.empty()) {
+                const std::string_view baseSv = RE::TESFullName::GetFullName(*base);
+                if (!baseSv.empty() && !TrimWhitespace(baseSv).empty()) {
+                    visibleName.assign(baseSv);
+                }
+            }
+            if (visibleName.empty()) {
+                continue;
+            }
+
+            const auto formType = base->GetFormType();
+            auto parsedAct = TargetInfo::SplitActivateText(actText.c_str());
+            std::string_view actVerb = !parsedAct.verb.empty() ? std::string_view(parsedAct.verb) : std::string_view(actText.c_str());
+            std::string translatedVerb;
+            if (!actVerb.empty() && actVerb.front() == '$') {
+                translatedVerb = TranslateScaleformKey(actVerb);
+                actVerb = translatedVerb;
+            }
+            if (IsDisallowedAssistTargetNameOrVerb(visibleName, actVerb, formType == RE::ENUM_FORM_ID::kACTI)) {
+                continue;
+            }
+
+            const bool isInventoryItemType =
+                (formType == RE::ENUM_FORM_ID::kWEAP ||
+                 formType == RE::ENUM_FORM_ID::kARMO ||
+                 formType == RE::ENUM_FORM_ID::kALCH ||
+                 formType == RE::ENUM_FORM_ID::kAMMO ||
+                 formType == RE::ENUM_FORM_ID::kMISC ||
+                 formType == RE::ENUM_FORM_ID::kKEYM ||
+                 formType == RE::ENUM_FORM_ID::kBOOK ||
+                 formType == RE::ENUM_FORM_ID::kNOTE ||
+                 formType == RE::ENUM_FORM_ID::kOMOD);
+            if (isInventoryItemType) {
+                const auto* instData = ResolveItemInstanceData(base, ref->extraList.get());
+                if (!base->GetPlayable(instData)) {
+                    continue;
+                }
+            }
+
+            const auto cat = AnchorManager::ClassifyReference(ref);
+            const bool isLooseItem = (cat == AnchorManager::TargetCategory::kItem) &&
+                                     (formType != RE::ENUM_FORM_ID::kACTI);
+            bool usedGeom = false;
+            const RE::NiPoint3 anchorPos = AnchorManager::ResolveAnchorWorldPosition(ref, nullptr, zeroOffsetCfg, &usedGeom);
+            if (!usedGeom) {
+                continue;
+            }
+            const float anchorDz = anchorPos.z - playerPos.z;
+            if (anchorDz < -30.0f || anchorDz > 140.0f) {
+                continue;
+            }
+            const float hx = anchorPos.x - playerPos.x;
+            const float hy = anchorPos.y - playerPos.y;
+            const float hLen = std::hypot(hx, hy);
+            const float dot = (hLen > 1.0f) ? ((hx * fwdX + hy * fwdY) / hLen) : 1.0f;
+            const float dist3D = rayOrigin.GetDistance(anchorPos);
+
+            ThirdPersonAssistCandidate cand{};
+            cand.dist = dist3D;
+            cand.forwardDot = dot;
+            cand.isLooseItem = isLooseItem;
+            cand.isCurrentAssistTarget = (currentAssistID != 0 && ref->GetFormID() == currentAssistID);
+            if (a_cam) {
+                float sx = 0.0f;
+                float sy = 0.0f;
+                if (a_cam->WorldPtToScreenPt(anchorPos, sx, sy, 0.001f)) {
+                    const float camDist = std::hypot((sx - 0.5f) * 1.5f, sy - 0.5f);
+                    cand.crosshairDot = std::clamp(1.0f - camDist * 1.15f, -1.0f, 1.0f);
+                    cand.hasCrosshairDot = true;
+                }
+            }
+
+            const float s = ScoreThirdPersonCandidate(cand, maxDist, minCos);
+            if (s > 0.0f) {
+                scored.push_back({ refPtr, anchorPos, s });
+            }
+        }
+
+        if (scored.empty()) {
+            return nullptr;
+        }
+
+        std::sort(scored.begin(), scored.end(), [](const ScoredRef& a, const ScoredRef& b) {
+            return a.score > b.score;
+        });
+
+        const std::size_t maxRayChecks = std::min<std::size_t>(scored.size(), 4);
+        for (std::size_t i = 0; i < maxRayChecks; ++i) {
+            auto* candRef = scored[i].ref.get();
+            bool hitSolidWall = false;
+            if (HasClearLineOfSightToRef(a_player, cell, candRef, rayOrigin, scored[i].targetPt, false, hitSolidWall)) {
+                return scored[i].ref;
+            }
+        }
+
+        return nullptr;
+    }
+
     bool Controller::OnHUDAdvance(RE::IMenu* a_hudMenu, float a_timeDelta)
     {
         PerformDeferredResets();
@@ -5612,6 +7463,8 @@ namespace HUDController
 
         const ConfigData cfg = Config::GetSingleton().GetSnapshot();
         _customQcTakeDebounceMs.store(static_cast<std::int64_t>(cfg.qcTakeDebounceMs), std::memory_order_relaxed);
+        _featuredExamineGraceMs.store(static_cast<std::int64_t>(cfg.featuredItemGraceMs), std::memory_order_relaxed);
+        _holdDurationMs.store(static_cast<std::int64_t>(std::lround(cfg.holdToActivateDuration * 1000.0f)), std::memory_order_relaxed);
         if (cfg.enabled) {
             ResolveGrabDelaySetting();
             ApplyGrabDelaySetting(cfg.grabHoldDelay);
@@ -5633,11 +7486,32 @@ namespace HUDController
             return false;
         }
         auto* player = RE::PlayerCharacter::GetSingleton();
+        auto* playerCam = RE::PlayerCamera::GetSingleton();
+        const std::int64_t frameNowMs = SteadyNowMs();
         const bool inPowerArmor = player && RE::PowerArmor::ActorInPowerArmor(*player);
         const bool bypassActive = inPowerArmor && cfg.powerArmorBypass;
         const auto visRect = movie.GetVisibleFrameRect();
         const float stageW = visRect.x2 - visRect.x1;
         const float stageH = visRect.y2 - visRect.y1;
+
+        const bool isThirdPersonCam =
+            (playerCam && playerCam->currentState &&
+             playerCam->currentState->id == RE::CameraState::k3rdPerson);
+        const bool isIronSightsCam =
+            (playerCam && playerCam->currentState &&
+             playerCam->currentState->id == RE::CameraState::kIronSights);
+        const bool rawPlayerAiming = (player != nullptr) &&
+            (player->gunState == RE::GUN_STATE::kSighted ||
+             player->gunState == RE::GUN_STATE::kFireSighted ||
+             isIronSightsCam);
+        std::int64_t lastAimMs = _lastAimingMs.load(std::memory_order_acquire);
+        const bool effectiveAiming = IsAimingWithCooldown(rawPlayerAiming, frameNowMs, lastAimMs, 280);
+        _lastAimingMs.store(lastAimMs, std::memory_order_release);
+        const bool inCommandModePre = (player && static_cast<bool>(player->actorDoingPlayerCommand));
+        bool inWorkshopPre = false;
+        if (auto* ui = RE::UI::GetSingleton()) {
+            inWorkshopPre = ui->GetMenuOpen("WorkshopMenu"sv);
+        }
 
         RE::NiPointer<RE::TESObjectREFR> pickedSmartPtr;
         RE::TESObjectREFR* targetRef = nullptr;
@@ -5669,7 +7543,157 @@ namespace HUDController
             }
         }
 
+        // Third-person character-facing proximity assist
+        RE::NiPointer<RE::TESObjectREFR> tpAssistSmartPtr;
+        bool usingTpAssist = false;
+        bool crosshairBlockedCompanion = false;
+        if (targetRef && cfg.limitCompanionPromptDistance && clips.rolloverRawVisible && player) {
+            if (auto* preActor = targetRef->As<RE::Actor>();
+                preActor && !IsActorDeadOrDying(preActor) && !IsActorBleedout(preActor) && IsCompanionActor(preActor, player)) {
+                const float preDist = player->GetPosition().GetDistance(targetRef->GetPosition());
+                const float maxCompD = (player->IsInCombat() || preActor->IsInCombat())
+                    ? cfg.companionCombatMaxDistance
+                    : cfg.companionMaxDistance;
+                if (preDist > maxCompD) {
+                    crosshairBlockedCompanion = true;
+                }
+            }
+        }
+
+        const bool canRunTpAssist =
+            modernRolloverActive &&
+            cfg.enabled &&
+            cfg.tpAssistEnabled &&
+            !bypassActive &&
+            isThirdPersonCam &&
+            !effectiveAiming &&
+            !clips.quickContainerVisible &&
+            !inCommandModePre &&
+            !inWorkshopPre &&
+            player != nullptr &&
+            cam != nullptr;
+
+        if (canRunTpAssist) {
+            const bool crosshairHasTarget =
+                (targetRef != nullptr) && clips.rolloverRawVisible && !crosshairBlockedCompanion;
+            bool crosshairIsLooseItem = false;
+            float crosshairDist = 0.0f;
+            if (crosshairHasTarget) {
+                crosshairDist = player->GetPosition().GetDistance(targetRef->GetPosition());
+                const auto cCat = AnchorManager::ClassifyReference(targetRef);
+                const auto* cBase = targetRef->GetObjectReference();
+                crosshairIsLooseItem = (cCat == AnchorManager::TargetCategory::kItem) &&
+                                       (cBase == nullptr || cBase->GetFormType() != RE::ENUM_FORM_ID::kACTI);
+            }
+            const bool wantOverride = ShouldThirdPersonAssistOverrideCrosshair(
+                cfg.tpAssistMode,
+                crosshairHasTarget,
+                clips.quickContainerVisible,
+                crosshairIsLooseItem,
+                crosshairDist,
+                cfg.tpAssistMaxDistance);
+
+            if (wantOverride) {
+                const std::int64_t nowMs = SteadyNowMs();
+                RE::NiPointer<RE::TESObjectREFR> existingPtr = _tpAssistRefHandle ? _tpAssistRefHandle.get() : nullptr;
+                bool lockedStillValid = false;
+                if (existingPtr && !existingPtr->IsDeleted() && !IsRefDisabled(existingPtr.get())) {
+                    auto* locked3D = existingPtr->Get3D();
+                    if (locked3D && !locked3D->GetAppCulled() &&
+                        player->GetPosition().GetDistance(existingPtr->GetPosition()) <= (cfg.tpAssistMaxDistance + 15.0f)) {
+                        if (auto* cell = player->GetParentCell()) {
+                            ConfigData zeroOffsetCfg = cfg;
+                            zeroOffsetCfg.doorOffset = {};
+                            zeroOffsetCfg.npcOffset = {};
+                            zeroOffsetCfg.containerOffset = {};
+                            zeroOffsetCfg.itemOffset = {};
+                            zeroOffsetCfg.furnitureOffset = {};
+                            bool usedGeom = false;
+                            const RE::NiPoint3 lockedPt =
+                                AnchorManager::ResolveAnchorWorldPosition(existingPtr.get(), nullptr, zeroOffsetCfg, &usedGeom);
+                            if (usedGeom) {
+                                bool hitWall = false;
+                                lockedStillValid = HasClearLineOfSightToRef(
+                                    player, cell, existingPtr.get(), ResolvePlayerEyeOrigin(player), lockedPt, false, hitWall);
+                            }
+                        }
+                    }
+                }
+                const bool keepLocked = ShouldKeepLockedThirdPersonTarget(
+                    _tpAssistLockedFormID,
+                    _tpAssistLockStartMs,
+                    nowMs,
+                    static_cast<std::int64_t>(cfg.tpAssistLockMs),
+                    lockedStillValid,
+                    crosshairHasTarget);
+
+                if (!keepLocked && (nowMs - _tpAssistLastScanMs) >= 50) {
+                    _tpAssistLastScanMs = nowMs;
+                    const bool looseOnly = crosshairHasTarget;
+                    auto found = FindThirdPersonAssistTarget(player, targetRef, looseOnly, cfg, cam);
+                    if (found) {
+                        const std::uint32_t foundID = found->GetFormID();
+                        _tpAssistRefHandle = found->GetHandle();
+                        if (foundID != _tpAssistLockedFormID) {
+                            _tpAssistLockedFormID = foundID;
+                            _tpAssistLockStartMs = nowMs;
+                        }
+                    } else {
+                        _tpAssistRefHandle.reset();
+                        _tpAssistLockedFormID = 0;
+                        _tpAssistLockStartMs = 0;
+                    }
+                }
+                if (_tpAssistRefHandle) {
+                    tpAssistSmartPtr = _tpAssistRefHandle.get();
+                    if (tpAssistSmartPtr && !tpAssistSmartPtr->IsDeleted() && !IsRefDisabled(tpAssistSmartPtr.get()) &&
+                        tpAssistSmartPtr->Get3D() != nullptr &&
+                        player->GetPosition().GetDistance(tpAssistSmartPtr->GetPosition()) <= (cfg.tpAssistMaxDistance + 15.0f)) {
+                        targetRef = tpAssistSmartPtr.get();
+                        targeted3DHint = nullptr;
+                        usingTpAssist = true;
+                    } else {
+                        _tpAssistRefHandle.reset();
+                        _tpAssistLockedFormID = 0;
+                        _tpAssistLockStartMs = 0;
+                    }
+                }
+            } else {
+                _tpAssistRefHandle.reset();
+                _tpAssistLockedFormID = 0;
+                _tpAssistLockStartMs = 0;
+            }
+        } else {
+            _tpAssistRefHandle.reset();
+            _tpAssistLockedFormID = 0;
+            _tpAssistLockStartMs = 0;
+        }
+        _tpAssistActive.store(usingTpAssist, std::memory_order_release);
+
+        // Execute deferred ActivateRef from either 3rd-person assist or Hold-to-Activate completion
+        const bool runAssistActivate = _tpAssistActivateRequested.exchange(false, std::memory_order_acq_rel);
+        const bool runHoldActivate = _holdPrimaryActivateRequested.exchange(false, std::memory_order_acq_rel);
+        if ((runAssistActivate || runHoldActivate) && targetRef && player && !targetRef->IsDeleted()) {
+            (void)targetRef->ActivateRef(player, nullptr, 0, false, false, false);
+            if (usingTpAssist) {
+                _tpAssistRefHandle.reset();
+                _tpAssistLockedFormID = 0;
+                _tpAssistLockStartMs = 0;
+                _tpAssistActive.store(false, std::memory_order_release);
+            }
+        }
+
         CompanionFilterDecision companionDecision{};
+        auto* targetActor = targetRef ? targetRef->As<RE::Actor>() : nullptr;
+        const bool targetIsDead = IsActorDeadOrDying(targetActor);
+        const bool targetIsLiveCompanion =
+            targetActor && !targetIsDead && player && IsCompanionActor(targetActor, player);
+        const bool targetIsLiveNonCompanionNpc =
+            targetActor && !targetIsDead && !targetIsLiveCompanion;
+        const float targetDist = (targetRef && player)
+            ? player->GetPosition().GetDistance(targetRef->GetPosition())
+            : 0.0f;
+
         if (cfg.limitCompanionPromptDistance && player) {
             EnsureActivateHook();
             EnsureMenuControlsHook();
@@ -5677,10 +7701,6 @@ namespace HUDController
             EnsureHUDDataModelHook();
             ResolveCompanionEngineSettings();
 
-            auto* targetActor = targetRef ? targetRef->As<RE::Actor>() : nullptr;
-            const bool targetIsDead = IsActorDeadOrDying(targetActor);
-            const bool targetIsLiveCompanion =
-                targetActor && !targetIsDead && IsCompanionActor(targetActor, player);
             const bool targetIsBleedout = targetIsLiveCompanion && IsActorBleedout(targetActor);
 
             bool targetHasHealVerb = false;
@@ -5723,9 +7743,7 @@ namespace HUDController
             filterIn.targetIsLiveCompanion = targetIsLiveCompanion;
             filterIn.targetIsBleedout = targetIsBleedout;
             filterIn.targetHasHealVerb = targetHasHealVerb;
-            filterIn.targetDistance = targetRef
-                ? player->GetPosition().GetDistance(targetRef->GetPosition())
-                : 0.0f;
+            filterIn.targetDistance = targetDist;
             filterIn.vanillaCommandPickDistance =
                 _hasOrigCommandPickDist ? _origCommandPickDist : 2000.0f;
             filterIn.vanillaCommandPickRadius =
@@ -5746,6 +7764,17 @@ namespace HUDController
             RestoreCompanionEngineSettings();
         }
 
+        const bool aimSuppressRollover = ShouldSuppressForAiming(
+            cfg.aimingPromptMode,
+            effectiveAiming,
+            targetIsLiveNonCompanionNpc || targetIsLiveCompanion,
+            false);
+        const bool aimSuppressQc = ShouldSuppressForAiming(
+            cfg.aimingPromptMode,
+            effectiveAiming,
+            false,
+            true);
+
         const bool blockHiddenComp = companionDecision.suppressTarget && cfg.blockHiddenCompanionInteractions;
         _suppressCompanionActivate.store(blockHiddenComp, std::memory_order_release);
         _suppressCompanionReady.store(blockHiddenComp, std::memory_order_release);
@@ -5753,6 +7782,47 @@ namespace HUDController
         bool changed = false;
         bool rolloverFloatingVisible = false;
         OverlaySnapshot nextOverlay{};
+        bool holdPriReqNext = false;
+        bool holdSecReqNext = false;
+        bool holdUseSyntheticTapNext = false;
+        bool holdInQcNext = false;
+        std::uint64_t holdTargetKeyNext = 0;
+
+        bool wallBlockedPrompt = false;
+        if (cfg.blockPromptsThroughWalls && !usingTpAssist && targetRef && player && !targetRef->IsDeleted() &&
+            !targetIsLiveCompanion) {
+            const auto tCat = AnchorManager::ClassifyReference(targetRef);
+            const auto* tBase = targetRef->GetObjectReference();
+            const bool isWaterBase =
+                tBase &&
+                (tBase->GetFormType() == RE::ENUM_FORM_ID::kWATR || tBase->GetWaterType() != nullptr);
+            if (!isWaterBase &&
+                (tCat == AnchorManager::TargetCategory::kContainer ||
+                 tCat == AnchorManager::TargetCategory::kFurnitureTerminal ||
+                 (tCat == AnchorManager::TargetCategory::kItem &&
+                  (!tBase || tBase->GetFormType() != RE::ENUM_FORM_ID::kACTI)))) {
+                if (auto* cell = player->GetParentCell()) {
+                    ConfigData zeroOffsetCfg = cfg;
+                    zeroOffsetCfg.doorOffset = {};
+                    zeroOffsetCfg.npcOffset = {};
+                    zeroOffsetCfg.containerOffset = {};
+                    zeroOffsetCfg.itemOffset = {};
+                    zeroOffsetCfg.furnitureOffset = {};
+                    bool usedGeom = false;
+                    const RE::NiPoint3 targetAnchor =
+                        AnchorManager::ResolveAnchorWorldPosition(targetRef, targeted3DHint, zeroOffsetCfg, &usedGeom);
+                    const RE::NiPoint3 targetPt = usedGeom ? targetAnchor : targetRef->GetPosition();
+                    const RE::NiPoint3 eyeOrigin =
+                        (!player->IsInThirdPerson() && cam) ? cam->world.translate : ResolvePlayerEyeOrigin(player);
+                    bool hitSolidWall = false;
+                    const bool losClear = HasClearLineOfSightToRef(
+                        player, cell, targetRef, eyeOrigin, targetPt, true, hitSolidWall);
+                    if (!losClear && hitSolidWall) {
+                        wallBlockedPrompt = true;
+                    }
+                }
+            }
+        }
 
         // 1. Rollover prompt controller + metadata publishing
         if (clips.hasRollover) {
@@ -5763,54 +7833,148 @@ namespace HUDController
             in.smoothingSpeed = cfg.smoothingSpeed;
             in.deltaSeconds = a_timeDelta;
             in.quickContainerVisible = clips.quickContainerVisible;
-            in.hideNativeClip = modernRolloverActive;
-            in.suppressTarget = companionDecision.suppressTarget;
+            in.hideNativeClip = modernRolloverActive || usingTpAssist;
+            in.suppressTarget = companionDecision.suppressTarget || aimSuppressRollover || wallBlockedPrompt;
 
-            in.rolloverVisible = clips.rolloverRawVisible;
+            in.rolloverVisible = clips.rolloverRawVisible || usingTpAssist;
             in.nativeClipVisible = clips.rolloverRawVisible;
             ReadClipBaseTransform(clips.rollover, in);
 
+            bool isWaterRollover = false;
+            bool isWaterSurfaceAnchor = false;
+            std::string terrainWaterKey;
+            std::string terrainWaterVerb;
+
+            auto computePlayerWaterAnchor = [&](float a_waterZ) -> RE::NiPoint3 {
+                const auto pPos = player->GetPosition();
+                const Vector3 pVec{ pPos.x, pPos.y, pPos.z };
+                const Vector3 cVec = cam
+                    ? Vector3{ cam->world.translate.x, cam->world.translate.y, cam->world.translate.z }
+                    : Vector3{ pPos.x, pPos.y, pPos.z + 90.0f };
+                const float yaw = player->data.angle.z;
+                const float pitch = player->data.angle.x;
+                const float cp = std::cos(pitch);
+                const Vector3 cFwd{ cp * std::sin(yaw), cp * std::cos(yaw), -std::sin(pitch) };
+                const Vector3 anc = ComputeWaterPromptAnchor(pVec, yaw, cVec, cFwd, a_waterZ, 105.0f);
+                return RE::NiPoint3{ anc.x, anc.y, anc.z };
+            };
+
+            auto readRolloverPrimaryParsed = [&]() -> TargetInfo::ActionParts {
+                std::string btnText;
+                if (TryReadTextField(clips.rollover, "RolloverButton_tf"sv, btnText)) {
+                    btnText = TranslateScaleformKey(btnText);
+                    auto parsed = TargetInfo::SplitActivateText(btnText);
+                    if (!parsed.verb.empty() && parsed.verb.front() == '$') {
+                        parsed.verb = TargetInfo::ToUpperAscii(TranslateScaleformKey(parsed.verb));
+                    }
+                    return parsed;
+                }
+                return {};
+            };
+
+            auto isTerrainWaterRollover = [&](const TargetInfo::ActionParts& a_parsed) -> bool {
+                if (a_parsed.verb.empty()) {
+                    return false;
+                }
+                if (VerbMatchesToken(a_parsed.verb, "DRINK")) {
+                    return true;
+                }
+                if (VerbMatchesToken(a_parsed.verb, "ACTIVATE")) {
+                    std::string rName;
+                    if (TryReadTextField(clips.rollover, "RolloverName_tf"sv, rName) &&
+                        TargetInfo::ToUpperAscii(TrimWhitespace(rName)) == "WATER") {
+                        return true;
+                    }
+                    std::vector<ButtonHintEntry> rHints;
+                    bool rHasPri = false;
+                    ReadButtonHintBar(clips.rollover, rHints, rHasPri);
+                    for (std::size_t hi = 1; hi < rHints.size(); ++hi) {
+                        if (VerbMatchesToken(rHints[hi].label, "FILL")) {
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            };
+
             if (in.enabled && !bypassActive && !in.quickContainerVisible && in.rolloverVisible &&
-                !companionDecision.suppressTarget && targetRef && cam) {
-                in.hasTarget = true;
-                const RE::NiPoint3 worldAnchor =
-                    ResolveStableAnchorWorldPosition(targetRef, targeted3DHint, cfg);
-                in.projectedTarget = ProjectWorldPoint(
-                    worldAnchor, *cam, visRect,
-                    cfg.enableClamping, cfg.edgeMargin,
-                    0.0f, 0.0f, 0.0f, 0.0f);
+                !in.suppressTarget && cam) {
+                if (targetRef) {
+                    in.hasTarget = true;
+                    RE::NiPoint3 worldAnchor =
+                        ResolveStableAnchorWorldPosition(targetRef, targeted3DHint, cfg);
+                    if (player) {
+                        const auto* tBase = targetRef->GetObjectReference();
+                        const bool isWatrForm = tBase && (tBase->GetFormType() == RE::ENUM_FORM_ID::kWATR);
+                        const bool hasWaterType = tBase && (tBase->GetWaterType() != nullptr);
+                        const float distFromPlayer = player->GetPosition().GetDistance(worldAnchor);
+                        if (isWatrForm || hasWaterType ||
+                            (tBase && tBase->GetFormType() == RE::ENUM_FORM_ID::kACTI && distFromPlayer > 160.0f)) {
+                            const auto parsed = !usingTpAssist ? readRolloverPrimaryParsed() : TargetInfo::ActionParts{};
+                            const bool isDrinkVerb = TargetInfo::ToUpperAscii(parsed.verb).rfind("DRINK", 0) == 0;
+                            if (isWatrForm || hasWaterType || isDrinkVerb) {
+                                isWaterRollover = true;
+                                if (isWatrForm || distFromPlayer > 160.0f) {
+                                    const float refZ = targetRef->GetPosition().z;
+                                    const float pZ = player->GetPosition().z;
+                                    const float waterZ = (refZ >= pZ - 45.0f && refZ <= pZ + 90.0f) ? refZ : (pZ + 8.0f);
+                                    worldAnchor = computePlayerWaterAnchor(waterZ);
+                                    isWaterSurfaceAnchor = true;
+                                }
+                            }
+                        }
+                    }
+                    in.projectedTarget = ProjectWorldPoint(
+                        worldAnchor, *cam, visRect,
+                        cfg.enableClamping, cfg.edgeMargin,
+                        0.0f, 0.0f, 0.0f, 0.0f);
+                } else if (!usingTpAssist && modernRolloverActive && player) {
+                    const auto parsed = readRolloverPrimaryParsed();
+                    if (isTerrainWaterRollover(parsed)) {
+                        in.hasTarget = true;
+                        const RE::NiPoint3 worldAnchor = computePlayerWaterAnchor(player->GetPosition().z + 8.0f);
+                        in.projectedTarget = ProjectWorldPoint(
+                            worldAnchor, *cam, visRect,
+                            cfg.enableClamping, cfg.edgeMargin,
+                            0.0f, 0.0f, 0.0f, 0.0f);
+                        isWaterRollover = true;
+                        isWaterSurfaceAnchor = true;
+                        terrainWaterKey = parsed.keyLabel.empty() ? std::string("E") : parsed.keyLabel;
+                        terrainWaterVerb = parsed.verb;
+                    }
+                }
             }
 
             const auto out = _state.Step(in);
             if (ApplyTransformToClip(movie, clips.rolloverParent, clips.rollover, out)) {
                 changed = true;
-            } else if ((modernRolloverActive || companionDecision.suppressTarget) && clips.rolloverRawVisible &&
+            } else if ((modernRolloverActive || in.suppressTarget || usingTpAssist) && clips.rolloverRawVisible &&
                        out.action == HUDAction::kNoOp && _state.IsHidingAlpha()) {
                 clips.rollover.SetMember("alpha"sv, RE::Scaleform::GFx::Value(0.0));
                 changed = true;
             }
 
             rolloverFloatingVisible =
-                (!companionDecision.suppressTarget &&
+                (!in.suppressTarget &&
                  out.action == HUDAction::kApplyFloat && in.projectedTarget.visible &&
-                 !clips.quickContainerVisible && targetRef && stageW > 0.0f && stageH > 0.0f);
-
-            if (!rolloverFloatingVisible || clips.quickContainerVisible || bypassActive || !cfg.enabled) {
-                _hoverTargetKey.store(0, std::memory_order_relaxed);
-                _hoverFirstSeenMs.store(0, std::memory_order_relaxed);
-            }
+                 !clips.quickContainerVisible && (targetRef || isWaterSurfaceAnchor) && stageW > 0.0f && stageH > 0.0f);
 
             if (rolloverFloatingVisible) {
                 const std::int64_t nowMs = SteadyNowMs();
-                const std::uint32_t formId = targetRef->GetFormID();
-                const std::uintptr_t targetKey = (formId != 0)
-                    ? static_cast<std::uintptr_t>(formId)
-                    : reinterpret_cast<std::uintptr_t>(targetRef);
-                std::int64_t firstSeen = _hoverFirstSeenMs.load(std::memory_order_relaxed);
-                if (targetKey != _hoverTargetKey.load(std::memory_order_relaxed) || firstSeen == 0) {
-                    _hoverTargetKey.store(targetKey, std::memory_order_relaxed);
-                    firstSeen = nowMs;
-                    _hoverFirstSeenMs.store(firstSeen, std::memory_order_relaxed);
+                const std::uint32_t formId = targetRef ? targetRef->GetFormID() : 0u;
+                std::uintptr_t targetKey = 0;
+                if (targetRef) {
+                    targetKey = (formId != 0)
+                        ? static_cast<std::uintptr_t>(formId)
+                        : reinterpret_cast<std::uintptr_t>(targetRef);
+                    nextOverlay.target = ResolveTargetMetadata(targetRef);
+                } else {
+                    targetKey = static_cast<std::uintptr_t>(0x5741544552ull);
+                    nextOverlay.target = {};
+                    nextOverlay.target.displayName = "WATER";
+                    nextOverlay.target.rawDisplayName = "WATER";
+                    nextOverlay.target.actionVerb = terrainWaterVerb.empty() ? std::string("DRINK") : terrainWaterVerb;
+                    nextOverlay.target.itemKind = TargetInfo::ItemKind::None;
                 }
 
                 nextOverlay.visible = true;
@@ -5819,20 +7983,13 @@ namespace HUDController
                 nextOverlay.normScreenY = std::clamp((out.y - visRect.y1) / stageH, 0.0f, 1.0f);
                 nextOverlay.edgeFade = in.projectedTarget.alpha;
                 nextOverlay.updateTimeMs = nowMs;
-                nextOverlay.targetFirstSeenMs = firstSeen;
-                nextOverlay.target = ResolveTargetMetadata(targetRef);
 
                 std::vector<ButtonHintEntry> hints;
                 bool hasPrimaryHintSource = false;
-                ReadButtonHintBar(clips.rollover, hints, hasPrimaryHintSource);
-                if (!hasPrimaryHintSource) {
-                    std::string btnText;
-                    if (TryReadTextField(clips.rollover, "RolloverButton_tf"sv, btnText)) {
-                        btnText = TranslateScaleformKey(btnText);
-                        auto parsed = TargetInfo::SplitActivateText(btnText);
-                        if (!parsed.verb.empty() && parsed.verb.front() == '$') {
-                            parsed.verb = TargetInfo::ToUpperAscii(TranslateScaleformKey(parsed.verb));
-                        }
+                if (!usingTpAssist) {
+                    ReadButtonHintBar(clips.rollover, hints, hasPrimaryHintSource);
+                    if (!hasPrimaryHintSource) {
+                        const auto parsed = readRolloverPrimaryParsed();
                         if (!parsed.verb.empty()) {
                             ButtonHintEntry primary;
                             primary.key = parsed.keyLabel.empty() ? std::string("E") : parsed.keyLabel;
@@ -5852,58 +8009,157 @@ namespace HUDController
                     }
                 }
                 if (!hints.empty()) {
-                    nextOverlay.actionKey = hints[0].key;
-                    nextOverlay.actionVerb = hints[0].label;
-                    if (hints.size() >= 2) {
-                        nextOverlay.secondaryKey = hints[1].key;
-                        nextOverlay.secondaryVerb = hints[1].label;
-                    }
                     nextOverlay.actions = std::move(hints);
                 }
-                if (nextOverlay.actionVerb.empty()) {
+                if (nextOverlay.actions.empty()) {
                     if (!nextOverlay.target.actionVerb.empty() && nextOverlay.target.actionVerb.front() == '$') {
                         nextOverlay.target.actionVerb = TargetInfo::ToUpperAscii(TranslateScaleformKey(nextOverlay.target.actionVerb));
                     }
-                    nextOverlay.actionVerb = nextOverlay.target.actionVerb;
-                }
-                if (nextOverlay.actions.empty() && !nextOverlay.actionVerb.empty()) {
-                    nextOverlay.actions.push_back({
-                        nextOverlay.actionKey.empty() ? std::string("E") : nextOverlay.actionKey,
-                        nextOverlay.actionVerb,
-                        true
-                    });
-                }
-
-                std::string rolloverName;
-                const bool hasRolloverName = TryReadTextField(clips.rollover, "RolloverName_tf"sv, rolloverName);
-                if (nextOverlay.target.isLoadDoor) {
-                    nextOverlay.target.doorDestination = TargetInfo::ResolveLoadDoorDestination(
-                        hasRolloverName ? rolloverName : std::string_view{},
-                        nextOverlay.target.displayName,
-                        nextOverlay.target.doorDestination,
-                        {});
+                    if (!nextOverlay.target.actionVerb.empty()) {
+                        nextOverlay.actions.push_back({
+                            terrainWaterKey.empty() ? std::string("E") : terrainWaterKey,
+                            nextOverlay.target.actionVerb,
+                            true
+                        });
+                    }
                 }
 
-                if (nextOverlay.target.displayName.empty() && hasRolloverName) {
-                    nextOverlay.target.displayName = std::move(rolloverName);
-                }
-                if (nextOverlay.target.rawDisplayName.empty() && !nextOverlay.target.displayName.empty()) {
-                    nextOverlay.target.rawDisplayName = nextOverlay.target.displayName;
-                }
+                // Per-action non-companion NPC distance filtering (keeps ranged actions up to npcRangedMaxDistance)
+                const bool npcFilteredOut = FilterNpcPromptActions(
+                    nextOverlay.actions,
+                    targetIsLiveNonCompanionNpc,
+                    targetDist,
+                    cfg.limitNpcPromptDistance,
+                    cfg.npcMaxDistance,
+                    cfg.npcKeepRangedActions,
+                    cfg.npcRangedMaxDistance);
 
-                bool rolloverCrime = (targetRef && !targetRef->IsDeleted() && targetRef->IsCrimeToActivate());
-                if (!rolloverCrime && IsCrimeActionVerb(nextOverlay.actionVerb)) {
-                    rolloverCrime = true;
-                }
-                if (!rolloverCrime) {
-                    for (const auto& act : nextOverlay.actions) {
-                        if (IsCrimeActionVerb(act.label)) {
-                            rolloverCrime = true;
+                if (npcFilteredOut) {
+                    nextOverlay.visible = false;
+                    rolloverFloatingVisible = false;
+                    if (clips.rolloverRawVisible) {
+                        clips.rollover.SetMember("alpha"sv, RE::Scaleform::GFx::Value(0.0));
+                        changed = true;
+                    }
+                } else {
+                    std::int64_t firstSeen = _hoverFirstSeenMs.load(std::memory_order_relaxed);
+                    if (targetKey != _hoverTargetKey.load(std::memory_order_relaxed) || firstSeen == 0) {
+                        _hoverTargetKey.store(targetKey, std::memory_order_relaxed);
+                        firstSeen = nowMs;
+                        _hoverFirstSeenMs.store(firstSeen, std::memory_order_relaxed);
+                    }
+                    nextOverlay.targetFirstSeenMs = firstSeen;
+
+                    if (!nextOverlay.actions.empty()) {
+                        nextOverlay.actionKey = nextOverlay.actions[0].key;
+                        nextOverlay.actionVerb = nextOverlay.actions[0].label;
+                        if (nextOverlay.actions.size() >= 2) {
+                            nextOverlay.secondaryKey = nextOverlay.actions[1].key;
+                            nextOverlay.secondaryVerb = nextOverlay.actions[1].label;
+                        }
+                    }
+
+                    std::string rolloverName;
+                    const bool hasRolloverName = !usingTpAssist && TryReadTextField(clips.rollover, "RolloverName_tf"sv, rolloverName);
+                    if (nextOverlay.target.isLoadDoor) {
+                        nextOverlay.target.doorDestination = TargetInfo::ResolveLoadDoorDestination(
+                            hasRolloverName ? rolloverName : std::string_view{},
+                            nextOverlay.target.displayName,
+                            nextOverlay.target.doorDestination,
+                            {});
+                    }
+
+                    if (nextOverlay.target.displayName.empty() && hasRolloverName) {
+                        nextOverlay.target.displayName = std::move(rolloverName);
+                    }
+                    if (nextOverlay.target.rawDisplayName.empty() && !nextOverlay.target.displayName.empty()) {
+                        nextOverlay.target.rawDisplayName = nextOverlay.target.displayName;
+                    }
+
+                    bool rolloverCrime = (targetRef && !targetRef->IsDeleted() && targetRef->IsCrimeToActivate());
+                    if (targetIsLiveNonCompanionNpc && cfg.limitNpcPromptDistance && targetDist > cfg.npcMaxDistance) {
+                        // Recompute crime strictly from surviving actions when close-range Pickpocket was filtered out
+                        rolloverCrime = false;
+                    }
+                    if (!rolloverCrime && IsCrimeActionVerb(nextOverlay.actionVerb)) {
+                        rolloverCrime = true;
+                    }
+                    if (!rolloverCrime) {
+                        for (const auto& act : nextOverlay.actions) {
+                            if (IsCrimeActionVerb(act.label)) {
+                                rolloverCrime = true;
+                                break;
+                            }
+                        }
+                    }
+                    nextOverlay.isCrime = rolloverCrime;
+
+                    // Hold-to-Activate tagging on surviving prompt actions
+                    holdTargetKeyNext = (formId != 0)
+                        ? static_cast<std::uint64_t>(formId)
+                        : (isWaterRollover ? 0x5741544552ull : reinterpret_cast<std::uint64_t>(targetRef));
+                    const std::string upperWaterDisp =
+                        TargetInfo::ToUpperAscii(TrimWhitespace(nextOverlay.target.displayName));
+                    bool hasFillSecondary = false;
+                    for (std::size_t ai = 1; ai < nextOverlay.actions.size(); ++ai) {
+                        if (VerbMatchesToken(nextOverlay.actions[ai].label, "FILL")) {
+                            hasFillSecondary = true;
                             break;
                         }
                     }
+                    const bool isWaterTarget = isWaterRollover || (upperWaterDisp == "WATER") || hasFillSecondary;
+                    for (std::size_t ai = 0; ai < nextOverlay.actions.size(); ++ai) {
+                        if (ai > 1) {
+                            break;
+                        }
+                        auto& act = nextOverlay.actions[ai];
+                        act.holdSlot = static_cast<std::uint8_t>(ai);
+                        const bool actCrime = IsCrimeActionVerb(act.label) ||
+                                              (rolloverCrime && ai == 0 && !IsRangedNpcActionVerb(act.label));
+                        act.requiresHold = DoesActionRequireHold(
+                            act.label,
+                            actCrime,
+                            nextOverlay.target.itemKind,
+                            nextOverlay.target.isLoadDoor,
+                            cfg,
+                            isWaterTarget && (ai == 0));
+                        if (act.requiresHold) {
+                            if (ai == 0) {
+                                holdPriReqNext = true;
+                                if (isWaterTarget || targetRef == nullptr) {
+                                    holdUseSyntheticTapNext = true;
+                                }
+                                act.holdProgress = GetLiveHoldProgress(0);
+                            } else if (ai == 1) {
+                                holdSecReqNext = true;
+                                act.holdProgress = GetLiveHoldProgress(1);
+                            }
+                        }
+                    }
                 }
-                nextOverlay.isCrime = rolloverCrime;
+            }
+
+            // World water / terrain-only rollover fallback for Vanilla style
+            if (!rolloverFloatingVisible &&
+                !clips.quickContainerVisible &&
+                !bypassActive &&
+                cfg.enabled &&
+                !aimSuppressRollover &&
+                clips.rolloverRawVisible &&
+                targetRef == nullptr) {
+                const auto parsed = readRolloverPrimaryParsed();
+                const bool isTerrainWater = isTerrainWaterRollover(parsed);
+                if (!parsed.verb.empty() &&
+                    DoesActionRequireHold(parsed.verb, false, TargetInfo::ItemKind::None, false, cfg, isTerrainWater)) {
+                    holdPriReqNext = true;
+                    holdUseSyntheticTapNext = true;
+                    holdTargetKeyNext = 0x5741544552ull; // "WATER"
+                }
+            }
+
+            if (!rolloverFloatingVisible || clips.quickContainerVisible || bypassActive || !cfg.enabled) {
+                _hoverTargetKey.store(0, std::memory_order_relaxed);
+                _hoverFirstSeenMs.store(0, std::memory_order_relaxed);
             }
         }
 
@@ -5919,11 +8175,11 @@ namespace HUDController
             qcIn.smoothingSpeed = cfg.quickContainerSmoothing;
             qcIn.deadzonePx = cfg.quickContainerDeadzone;
             qcIn.hideNativeClip = modernQcActive;
-            qcIn.suppressTarget = companionDecision.suppressTarget;
+            qcIn.suppressTarget = companionDecision.suppressTarget || aimSuppressQc || wallBlockedPrompt;
             qcIn.deltaSeconds = a_timeDelta;
             ReadClipBaseTransform(clips.quickContainer, qcIn);
 
-            if (qcIn.enabled && !bypassActive && qcIn.rolloverVisible) {
+            if (qcIn.enabled && !bypassActive && qcIn.rolloverVisible && !qcIn.suppressTarget) {
                 if (!cfg.floatQuickContainer && modernQcActive) {
                     qcIn.hasTarget = true;
                     qcIn.projectedTarget = { visRect.x1 + 0.54f * stageW, visRect.y1 + 0.45f * stageH, 1.0f, true };
@@ -5960,7 +8216,7 @@ namespace HUDController
             }
             if (ApplyTransformToClip(movie, clips.qcParent, clips.quickContainer, qcApplyOut)) {
                 changed = true;
-            } else if ((modernQcActive || companionDecision.suppressTarget) && clips.quickContainerRawVisible &&
+            } else if ((modernQcActive || qcIn.suppressTarget) && clips.quickContainerRawVisible &&
                        qcOut.action == HUDAction::kNoOp && _qcState.IsHidingAlpha()) {
                 clips.quickContainer.SetMember("alpha"sv, RE::Scaleform::GFx::Value(0.0));
                 changed = true;
@@ -5971,7 +8227,7 @@ namespace HUDController
             const bool publishGraceQc =
                 (qcOut.action == HUDAction::kNoOp && _qcState.IsHidingAlpha() && _qcState.HasLastScreen());
 
-            if (modernQcActive && clips.quickContainerVisible && !companionDecision.suppressTarget &&
+            if (modernQcActive && clips.quickContainerVisible && !qcIn.suppressTarget &&
                 (publishFloatQc || publishGraceQc) && stageW > 0.0f && stageH > 0.0f) {
                 EngineQuickContainerSnapshot engineSnap;
                 if (hasPreEngineQc) {
@@ -6055,6 +8311,7 @@ namespace HUDController
                     invOwner != nullptr &&
                     (wantCustomQuickLoot ||
                      cfg.qcShowItemIcons ||
+                     cfg.itemConditionDisplay != 0 ||
                      (cfg.qcExpandInventoryList &&
                       (!engineSnap.valid || engineHasEllipsis || engineSnap.items.size() >= 5)));
                 const CachedInventorySnapshot* invSnapPtr = shouldCollectInv
@@ -6082,7 +8339,7 @@ namespace HUDController
 
                     if (_customQcTakeRequested.exchange(false, std::memory_order_acq_rel) &&
                         player &&
-                        engineSnap.buttonAEnabled &&
+                        !engineSnap.isLocked &&
                         !targetIsCrime &&
                         engineSnap.mode != RE::QuickContainerMode::kPowerArmor &&
                         engineSnap.mode != RE::QuickContainerMode::kStealingPowerArmor &&
@@ -6140,7 +8397,7 @@ namespace HUDController
                                 _customQcSortedItems[static_cast<std::size_t>(i)]);
                         }
                         _customQcTakeEnabled.store(
-                            engineSnap.buttonAEnabled &&
+                            !engineSnap.isLocked &&
                             !targetIsCrime &&
                             engineSnap.mode != RE::QuickContainerMode::kPowerArmor &&
                             engineSnap.mode != RE::QuickContainerMode::kStealingPowerArmor,
@@ -6201,6 +8458,57 @@ namespace HUDController
                     }
                 }
                 nextOverlay.quickContainer.isCrime = qcCrime;
+
+                // Hold-to-Activate tagging on QuickContainer buttons (Workbenches, Power Armor, Steal Containers)
+                if (nextOverlay.quickContainer.buttons.empty()) {
+                    if (!nextOverlay.quickContainer.items.empty()) {
+                        nextOverlay.quickContainer.buttons.push_back({ "E", "TAKE", true });
+                        nextOverlay.quickContainer.buttons.push_back({ "R", "TRANSFER", true });
+                    } else if (isWorkbench) {
+                        nextOverlay.quickContainer.buttons.push_back({ "E", "CRAFT", true });
+                        nextOverlay.quickContainer.buttons.push_back({ "R", "TRANSFER", true });
+                    } else {
+                        nextOverlay.quickContainer.buttons.push_back({ "R", "TRANSFER", true });
+                    }
+                }
+                const TargetInfo::ItemKind qcHoldKind =
+                    (isWorkbench || isPowerArmorMode) ? TargetInfo::ItemKind::Furniture : targetMeta.itemKind;
+                const std::uint64_t qcHoldKey = (ownerFormID != 0)
+                    ? static_cast<std::uint64_t>(ownerFormID)
+                    : (targetRef ? static_cast<std::uint64_t>(targetRef->GetFormID()) : 0x51435549ull);
+                const bool hasEnginePrimaryBtn = engineSnap.valid
+                    ? !engineSnap.aButtonText.empty()
+                    : (!nextOverlay.quickContainer.items.empty() || isWorkbench || nextOverlay.quickContainer.buttons.size() >= 2);
+                for (std::size_t bi = 0; bi < nextOverlay.quickContainer.buttons.size(); ++bi) {
+                    if (bi > 1) {
+                        break;
+                    }
+                    auto& qBtn = nextOverlay.quickContainer.buttons[bi];
+                    const std::string upperKey = TargetInfo::ToUpperAscii(qBtn.key);
+                    const bool isSecondarySlot =
+                        (bi == 1) ||
+                        (!hasEnginePrimaryBtn && bi == 0) ||
+                        upperKey == "R" ||
+                        upperKey == "X" ||
+                        upperKey == "SQUARE";
+                    const std::uint8_t holdSlotIdx = isSecondarySlot ? 1u : 0u;
+                    qBtn.holdSlot = holdSlotIdx;
+                    const bool btnCrime = IsCrimeActionVerb(qBtn.label) || (qcCrime && !isSecondarySlot && !isWorkbench);
+                    qBtn.requiresHold = DoesActionRequireHold(qBtn.label, btnCrime, qcHoldKind, false, cfg);
+                    if (qBtn.requiresHold) {
+                        holdInQcNext = true;
+                        holdTargetKeyNext = qcHoldKey;
+                        if (holdSlotIdx == 0u) {
+                            holdPriReqNext = true;
+                            holdUseSyntheticTapNext = true;
+                            qBtn.holdProgress = GetLiveHoldProgress(0);
+                        } else {
+                            holdSecReqNext = true;
+                            qBtn.holdProgress = GetLiveHoldProgress(1);
+                        }
+                    }
+                }
+
                 nextOverlay.quickContainer.normScreenX = cfg.floatQuickContainer
                     ? std::clamp((screenX - visRect.x1) / stageW, 0.0f, 1.0f)
                     : 0.54f;
@@ -6253,6 +8561,18 @@ namespace HUDController
             InvalidateQuickContainerCacheInternal();
         }
 
+        _holdPrimaryRequired.store(holdPriReqNext, std::memory_order_release);
+        _holdSecondaryRequired.store(holdSecReqNext, std::memory_order_release);
+        _holdPrimaryUseSyntheticTap.store(holdUseSyntheticTapNext, std::memory_order_release);
+        _holdInQuickContainer.store(holdInQcNext, std::memory_order_release);
+        _holdTargetKey.store(holdTargetKeyNext, std::memory_order_release);
+        if (!holdPriReqNext) {
+            _holdPrimaryProgress.store(0.0f, std::memory_order_release);
+        }
+        if (!holdSecReqNext) {
+            _holdSecondaryProgress.store(0.0f, std::memory_order_release);
+        }
+
         const bool inCommandMode = (player && static_cast<bool>(player->actorDoingPlayerCommand));
         bool inWorkshopMenu = false;
         if (auto* ui = RE::UI::GetSingleton()) {
@@ -6260,10 +8580,10 @@ namespace HUDController
         }
         const bool effectiveModernRollover = modernRolloverActive && cfg.enabled && !bypassActive;
         const bool anyRolloverPromptVisible =
-            !companionDecision.suppressTarget &&
+            !companionDecision.suppressTarget && !aimSuppressRollover &&
             (effectiveModernRollover ? rolloverFloatingVisible : (clips.hasRollover && clips.rolloverRawVisible));
         const bool anyPromptVisible =
-            anyRolloverPromptVisible || (clips.quickContainerVisible && !companionDecision.suppressTarget);
+            anyRolloverPromptVisible || (clips.quickContainerVisible && !companionDecision.suppressTarget && !aimSuppressQc);
         const bool blockOrphanSecondary =
             cfg.enabled &&
             !bypassActive &&

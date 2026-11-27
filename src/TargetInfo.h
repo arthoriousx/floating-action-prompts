@@ -38,6 +38,7 @@ namespace TargetInfo
     {
         std::string label;
         std::string value;
+        bool isCondition{ false };
     };
 
     struct TargetMetadata
@@ -66,6 +67,10 @@ namespace TargetInfo
         // Armor stats
         bool isArmor{ false };
         std::uint32_t armorRating{ 0 };
+
+        // Item condition (Power Armor pieces & Native Equipment Condition)
+        bool hasCondition{ false };
+        float conditionPercent{ 100.0f };
 
         // Door transition metadata
         bool isLoadDoor{ false };
@@ -100,8 +105,33 @@ namespace TargetInfo
     [[nodiscard]] std::string FormatInlineSummary(const TargetMetadata& a_meta, const ConfigData& a_cfg);
     [[nodiscard]] std::vector<CardRow> BuildInfoCardRows(const TargetMetadata& a_meta, const ConfigData& a_cfg);
 
+    struct ConditionResolveInput
+    {
+        ItemKind itemKind{ ItemKind::None };
+        bool isPowerArmor{ false };
+        bool hasExtraHealth{ false };
+        float rawHealth{ 0.0f };
+        bool necInstalled{ false };
+    };
+
+    struct ConditionResult
+    {
+        bool hasCondition{ false };
+        float conditionPercent{ 100.0f };
+    };
+
+    [[nodiscard]] ConditionResult ResolveItemCondition(const ConditionResolveInput& a_in) noexcept;
+    [[nodiscard]] std::uint32_t GetConditionColorRgb(float a_conditionPercent, std::uint32_t a_normalRgb) noexcept;
+    [[nodiscard]] std::string FormatConditionPercent(float a_conditionPercent);
+    [[nodiscard]] bool IsNecInstalled() noexcept;
+
 #ifndef FAP_UNIT_TEST
     [[nodiscard]] ItemKind ClassifyBoundObject(const RE::TESBoundObject* a_baseObj);
+    [[nodiscard]] ConditionResult ResolveObjectCondition(
+        const RE::TESBoundObject* a_baseObj,
+        RE::ExtraDataList* a_extraList,
+        ItemKind a_kind,
+        const RE::TBO_InstanceData* a_instData = nullptr);
     [[nodiscard]] TargetMetadata ExtractTargetMetadata(RE::TESObjectREFR* a_targetRef);
     [[nodiscard]] TargetMetadata ExtractInventoryItemMetadata(RE::TESBoundObject* a_baseObj, RE::ExtraDataList* a_extraList);
 #endif

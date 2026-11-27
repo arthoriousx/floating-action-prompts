@@ -31,7 +31,10 @@ namespace MenuFrameworkUI
         std::atomic<bool> g_hudOverlayActive{ false };
         std::atomic<bool> g_drawImageSupported{ false };
         std::atomic<bool> g_circlePrimitivesSupported{ false };
+        std::atomic<bool> g_linePrimitivesSupported{ false };
         std::atomic<bool> g_findGlyphSupported{ false };
+        std::atomic<bool> g_tooltipsSupported{ false };
+        std::atomic<bool> g_tooltipWrapSupported{ false };
 
         struct GamepadTextureCache
         {
@@ -632,6 +635,7 @@ namespace MenuFrameworkUI
         {
             bool valid{ false };
             bool usedFallback{ false };
+            bool bakedColors{ false };
             ImGuiMCP::ImVec2 uv0{};
             ImGuiMCP::ImVec2 uv1{};
         };
@@ -719,8 +723,26 @@ namespace MenuFrameworkUI
             if (!g_falluiAtlas.hasBaseSwf) {
                 return "FallUI_IconLib.swf missing in Data/Interface; using FontAwesome fallback.";
             }
+            const auto loadedAddons = g_falluiAtlas.registry.LoadedAddonNames();
+            std::string addonSummary;
+            if (!loadedAddons.empty()) {
+                addonSummary = " | " + std::to_string(loadedAddons.size()) + " addon(s): ";
+                const std::size_t maxList = std::min<std::size_t>(loadedAddons.size(), 3);
+                for (std::size_t i = 0; i < maxList; ++i) {
+                    if (i > 0) {
+                        addonSummary += ", ";
+                    }
+                    addonSummary += loadedAddons[i];
+                }
+                if (loadedAddons.size() > maxList) {
+                    addonSummary += " (+" + std::to_string(loadedAddons.size() - maxList) + ")";
+                }
+            }
+            const std::string activeColorSet = g_falluiAtlas.registry.ActiveColorSetName();
+            const std::string colorSuffix = activeColorSet.empty() ? "" : (" | ColorSet: " + activeColorSet);
             return "Loaded " + std::to_string(g_falluiAtlas.registry.TagCount()) +
-                   " FIS tags (" + std::to_string(g_falluiAtlas.nextSlot) + " icons cached in VRAM).";
+                   " FIS tags" + colorSuffix + addonSummary +
+                   " (" + std::to_string(g_falluiAtlas.nextSlot) + " cached in VRAM).";
         }
 
         [[nodiscard]] bool EnsureFallUID3DTexture(ID3D11Device* a_dev)
@@ -803,7 +825,31 @@ namespace MenuFrameworkUI
                 return false;
             }
 
-            const std::string tileKey = TargetInfo::ToUpperAscii(resolved.swfRelPath + "|" + resolved.symbolName);
+            std::string tileKey = TargetInfo::ToUpperAscii(resolved.swfRelPath + "|" + resolved.symbolName);
+            const bool activeHasColor =
+                resolved.hasColor || resolved.hasSubColor ||
+                resolved.fallbackHasColor || resolved.fallbackHasSubColor;
+            if (!resolved.subSymbolName.empty() || (resolved.hasFallback && !resolved.fallbackSubSymbolName.empty())) {
+                tileKey += "+" + TargetInfo::ToUpperAscii(resolved.subSymbolName);
+                if (resolved.hasFallback) {
+                    tileKey += "|FB:" + TargetInfo::ToUpperAscii(
+                        resolved.fallbackSwfRelPath + "|" + resolved.fallbackSymbolName + "+" + resolved.fallbackSubSymbolName);
+                }
+                if (!a_cfg.coloredCategoryIcons) {
+                    tileKey += "#MONO";
+                } else if (activeHasColor) {
+                    char colorBuf[40]{};
+                    std::snprintf(
+                        colorBuf,
+                        sizeof(colorBuf),
+                        "#%06X#%06X#%06X#%06X",
+                        resolved.hasColor ? (resolved.rgbColor & 0xFFFFFFu) : 0xFFFFFFu,
+                        resolved.hasSubColor ? (resolved.subRgbColor & 0xFFFFFFu) : (resolved.hasColor ? (resolved.rgbColor & 0xFFFFFFu) : 0xFFFFFFu),
+                        resolved.fallbackHasColor ? (resolved.fallbackRgbColor & 0xFFFFFFu) : 0xFFFFFFu,
+                        resolved.fallbackHasSubColor ? (resolved.fallbackSubRgbColor & 0xFFFFFFu) : (resolved.fallbackHasColor ? (resolved.fallbackRgbColor & 0xFFFFFFu) : 0xFFFFFFu));
+                    tileKey += colorBuf;
+                }
+            }
             auto it = g_falluiAtlas.slots.find(tileKey);
             if (it == g_falluiAtlas.slots.end()) {
                 if (g_falluiAtlas.nextSlot >= kFallUIMaxSlots) {
@@ -812,8 +858,14 @@ namespace MenuFrameworkUI
                 FallUIAtlasSlot newSlot{};
                 std::vector<std::uint8_t> rgba;
                 bool usedFallback = false;
+                bool bakedColors = false;
                 if (g_falluiAtlas.registry.RasterizeResolvedIcon(
-                        resolved, FallUIIcons::kIconTileSize, rgba, &usedFallback) &&
+                        resolved,
+                        FallUIIcons::kIconTileSize,
+                        rgba,
+                        &usedFallback,
+                        a_cfg.coloredCategoryIcons,
+                        &bakedColors) &&
                     rgba.size() == static_cast<std::size_t>(FallUIIcons::kIconTileSize) *
                                        static_cast<std::size_t>(FallUIIcons::kIconTileSize) * 4u) {
                     ID3D11DeviceContext* ctx = nullptr;
@@ -843,6 +895,7 @@ namespace MenuFrameworkUI
                         };
                         newSlot.valid = true;
                         newSlot.usedFallback = usedFallback;
+                        newSlot.bakedColors = bakedColors;
                     }
                 }
                 it = g_falluiAtlas.slots.emplace(tileKey, newSlot).first;
@@ -854,8 +907,15 @@ namespace MenuFrameworkUI
 
             a_outTex = reinterpret_cast<ImGuiMCP::ImTextureID>(g_falluiAtlas.srv);
             a_outSlot = it->second;
-            a_outRgb = it->second.usedFallback ? resolved.fallbackRgbColor : resolved.rgbColor;
-            a_outHasColor = it->second.usedFallback ? resolved.fallbackHasColor : resolved.hasColor;
+            const bool activeColorPresent = it->second.usedFallback ? resolved.fallbackHasColor : resolved.hasColor;
+            if (it->second.bakedColors) {
+                // Dual-color primary + subicon was pre-baked in RasterizeResolvedIcon
+                a_outRgb = 0xFFFFFFu;
+                a_outHasColor = true;
+            } else {
+                a_outRgb = it->second.usedFallback ? resolved.fallbackRgbColor : resolved.rgbColor;
+                a_outHasColor = activeColorPresent;
+            }
             return true;
         }
 
@@ -1211,7 +1271,7 @@ namespace MenuFrameworkUI
                     }
                     // Intentional fallthrough to safe rounded keycap fallback if circle primitives are unavailable
                 } else if (g_circlePrimitivesSupported.load(std::memory_order_acquire)) {
-                    // Styles 3 & 4: Clean Monochrome (GTA 6 white badge + dark crisp glyph/symbol)
+                    // Styles 3 & 4: Clean Monochrome (white badge + dark crisp glyph/symbol)
                     if (a_shadow) {
                         ImGuiMCP::ImDrawListManager::AddCircleFilled(
                             a_dl, { a_center.x + shadowDx, a_center.y + shadowDy }, half, MakeCol(0, 0, 0, 0.55f * a_fade), 28);
@@ -1258,6 +1318,101 @@ namespace MenuFrameworkUI
                 a_dl, a_font, capFontSize,
                 { a_center.x - tSz.x * 0.5f, a_center.y - tSz.y * 0.5f },
                 MakeCol(16, 20, 26, a_fade), keyTxt.c_str());
+        }
+
+        void DrawHoldProgressRing(
+            ImGuiMCP::ImDrawList* a_dl,
+            ImGuiMCP::ImFont* a_font,
+            const ImGuiMCP::ImVec2& a_center,
+            float a_size,
+            float a_keyTextScale,
+            int a_buttonIconStyle,
+            const std::string& a_keyLabel,
+            std::size_t a_actionIdx,
+            float a_rounding,
+            float a_scale,
+            float a_progress,
+            int a_ringStyle,
+            bool a_useCrimeRed,
+            std::uint32_t a_accentRgb,
+            float a_fade)
+        {
+            if (!g_linePrimitivesSupported.load(std::memory_order_acquire)) {
+                return;
+            }
+            const bool monochromeRing = (a_ringStyle == 0);
+            const float pad = monochromeRing ? std::max(2.5f, 3.2f * a_scale) : std::max(2.0f, 2.5f * a_scale);
+            const float fillThick = monochromeRing ? std::max(2.2f, 2.8f * a_scale) : std::max(1.8f, 2.5f * a_scale);
+            const float trackThick = monochromeRing ? fillThick : std::max(1.0f, 1.25f * a_scale);
+            const float casingThick = fillThick + std::max(2.0f, 2.4f * a_scale);
+            const ImGuiMCP::ImU32 casingCol = MakeCol(0, 0, 0, 0.90f * a_fade);
+            const ImGuiMCP::ImU32 trackCol = monochromeRing
+                ? MakeCol(105, 112, 120, 0.72f * a_fade)
+                : MakeRgbCol(a_accentRgb, 0.30f * a_fade);
+            const ImGuiMCP::ImU32 fillCol = (monochromeRing && !a_useCrimeRed)
+                ? MakeCol(255, 255, 255, 0.98f * a_fade)
+                : MakeRgbCol(a_accentRgb, 0.98f * a_fade);
+            const float clampedProg = std::clamp(a_progress, 0.0f, 1.0f);
+            const int circleSegs = monochromeRing ? 36 : 28;
+
+            const bool isCircularGamepad =
+                (a_buttonIconStyle >= 1 && a_buttonIconStyle <= 4) &&
+                (a_buttonIconStyle <= 2
+                    ? (g_drawImageSupported.load(std::memory_order_acquire) ||
+                       g_circlePrimitivesSupported.load(std::memory_order_acquire))
+                    : g_circlePrimitivesSupported.load(std::memory_order_acquire));
+
+            std::vector<OverlayLayout::HoldRingSegment> segs;
+            if (isCircularGamepad) {
+                const float r = a_size * 0.5f + pad;
+                OverlayLayout::BuildCircleProgressSegments(a_center.x, a_center.y, r, 1.0f, circleSegs, segs);
+                if (monochromeRing) {
+                    for (const auto& s : segs) {
+                        ImGuiMCP::ImDrawListManager::AddLine(a_dl, { s.x1, s.y1 }, { s.x2, s.y2 }, casingCol, casingThick);
+                    }
+                }
+                for (const auto& s : segs) {
+                    ImGuiMCP::ImDrawListManager::AddLine(a_dl, { s.x1, s.y1 }, { s.x2, s.y2 }, trackCol, trackThick);
+                }
+                if (clampedProg > 0.005f) {
+                    OverlayLayout::BuildCircleProgressSegments(a_center.x, a_center.y, r, clampedProg, circleSegs, segs);
+                    for (const auto& s : segs) {
+                        ImGuiMCP::ImDrawListManager::AddLine(a_dl, { s.x1, s.y1 }, { s.x2, s.y2 }, fillCol, fillThick);
+                    }
+                }
+                return;
+            }
+
+            const std::string keyTxt = a_keyLabel.empty() ? std::string(FallbackKeyForIndex(a_actionIdx)) : a_keyLabel;
+            const float relScale = std::clamp(a_keyTextScale, 0.40f, 1.20f);
+            const float capFontSize = a_size * relScale;
+            const auto tSz = MeasureTextScaled(a_font, capFontSize, keyTxt.c_str());
+            const float half = a_size * 0.5f;
+            const float capHalfW = std::max(half, tSz.x * 0.5f + a_size * 0.20f) + pad;
+            const float capHalfH = std::max(half, tSz.y * 0.42f + a_size * 0.08f) + pad;
+            const float r = std::clamp(a_rounding * 0.65f, 0.0f, 10.0f) + pad * 0.6f;
+
+            OverlayLayout::BuildRoundedRectProgressSegments(
+                a_center.x - capHalfW, a_center.y - capHalfH,
+                a_center.x + capHalfW, a_center.y + capHalfH,
+                r, 1.0f, segs);
+            if (monochromeRing) {
+                for (const auto& s : segs) {
+                    ImGuiMCP::ImDrawListManager::AddLine(a_dl, { s.x1, s.y1 }, { s.x2, s.y2 }, casingCol, casingThick);
+                }
+            }
+            for (const auto& s : segs) {
+                ImGuiMCP::ImDrawListManager::AddLine(a_dl, { s.x1, s.y1 }, { s.x2, s.y2 }, trackCol, trackThick);
+            }
+            if (clampedProg > 0.005f) {
+                OverlayLayout::BuildRoundedRectProgressSegments(
+                    a_center.x - capHalfW, a_center.y - capHalfH,
+                    a_center.x + capHalfW, a_center.y + capHalfH,
+                    r, clampedProg, segs);
+                for (const auto& s : segs) {
+                    ImGuiMCP::ImDrawListManager::AddLine(a_dl, { s.x1, s.y1 }, { s.x2, s.y2 }, fillCol, fillThick);
+                }
+            }
         }
 
         [[nodiscard]] float MeasureKeySpanW(
@@ -1399,6 +1554,20 @@ namespace MenuFrameworkUI
             if (a_cfg.showDoorDestination && a_snap.target.isLoadDoor && !a_snap.target.doorDestination.empty()) {
                 doorHeader = TargetInfo::ToUpperAscii(
                     TargetInfo::CleanDisplayName(a_snap.target.doorDestination, a_cfg.cleanSorterTags));
+            } else if (a_cfg.showInteractableHeader && a_cfg.modernTextMode == 0 && !a_snap.target.displayName.empty()) {
+                const bool isWorldInteractable =
+                    (a_snap.target.category == AnchorManager::TargetCategory::kFurnitureTerminal) ||
+                    (a_snap.target.itemKind == TargetInfo::ItemKind::None &&
+                     !a_snap.target.hasItemStats &&
+                     !a_snap.target.isNpc &&
+                     !a_snap.target.isLoadDoor);
+                if (isWorldInteractable) {
+                    std::string hdr = TargetInfo::ToUpperAscii(
+                        TargetInfo::CleanDisplayName(a_snap.target.displayName, a_cfg.cleanSorterTags));
+                    if (!hdr.empty() && hdr != actions[0].label) {
+                        doorHeader = std::move(hdr);
+                    }
+                }
             }
 
             std::string name;
@@ -1457,9 +1626,12 @@ namespace MenuFrameworkUI
                 keyTexts[i] = actions[i].key.empty() ? FallbackKeyForIndex(i) : actions[i].key;
                 keySpans[i] = MeasureKeySpanW(a_baseFont, badgeSize, keyTextScale, a_cfg.buttonIconStyle, keyTexts[i]);
                 verbSzs[i] = MeasureTextScaled(a_baseFont, actionFontSize, actions[i].label.c_str());
-                float w = keySpans[i] + itemGap + verbSzs[i].x;
+                const float holdPad = actions[i].requiresHold
+                    ? ((a_cfg.holdRingStyle == 0 ? 6.5f : 5.0f) * scale)
+                    : 0.0f;
+                float w = keySpans[i] + holdPad + itemGap + verbSzs[i].x;
                 float h = std::max(
-                    MeasureKeyBadgeH(a_baseFont, badgeSize, keyTextScale, a_cfg.buttonIconStyle, keyTexts[i]),
+                    MeasureKeyBadgeH(a_baseFont, badgeSize, keyTextScale, a_cfg.buttonIconStyle, keyTexts[i]) + holdPad,
                     verbSzs[i].y);
                 if (i == 0) {
                     if (iconSz.x > 0.0f) {
@@ -1540,19 +1712,34 @@ namespace MenuFrameworkUI
             auto drawSingleAction = [&](std::size_t a_idx, float a_startX, float a_centerY) {
                 const float alphaMult = actions[a_idx].enabled ? 1.0f : 0.45f;
                 const float rowAlpha = overallAlpha * alphaMult;
-                float cx = a_startX;
+                const float holdEdgePad = actions[a_idx].requiresHold
+                    ? ((a_cfg.holdRingStyle == 0 ? 3.25f : 2.5f) * scale)
+                    : 0.0f;
+                float cx = a_startX + holdEdgePad;
+                const ImGuiMCP::ImVec2 badgeCenter{ cx + keySpans[a_idx] * 0.5f, a_centerY };
 
                 DrawKeycapOrGamepadBadge(
-                    a_dl, a_baseFont, { cx + keySpans[a_idx] * 0.5f, a_centerY },
+                    a_dl, a_baseFont, badgeCenter,
                     badgeSize, keyTextScale, a_cfg.buttonIconStyle, keyTexts[a_idx],
                     a_idx, rounding, a_cfg.modernTextShadow, rowAlpha);
-                cx += keySpans[a_idx] + itemGap;
+                if (actions[a_idx].requiresHold) {
+                    const float liveProg = HUDController::Controller::GetSingleton().GetLiveHoldProgress(actions[a_idx].holdSlot);
+                    const float ringProg = std::max(actions[a_idx].holdProgress, liveProg);
+                    const bool actCrime = useCrimeColor ||
+                                          (a_cfg.highlightCrimePrompts && HUDController::IsCrimeActionVerb(actions[a_idx].label));
+                    const std::uint32_t ringRgb = actCrime ? a_cfg.crimeTextColor : a_cfg.modernAccentColor;
+                    DrawHoldProgressRing(
+                        a_dl, a_baseFont, badgeCenter,
+                        badgeSize, keyTextScale, a_cfg.buttonIconStyle, keyTexts[a_idx],
+                        a_idx, rounding, scale, ringProg, a_cfg.holdRingStyle, actCrime, ringRgb, rowAlpha);
+                }
+                cx += keySpans[a_idx] + holdEdgePad + itemGap;
 
                 if (a_idx == 0 && iconSz.x > 0.0f) {
                     const std::uint32_t baseColorRgb = OverlayLayout::GetItemIconColorRgb(
                         a_snap.target.itemKind, a_cfg.modernIconColor, a_cfg.coloredCategoryIcons);
-                    const std::uint32_t iconRgb = (hasFallIcon && a_cfg.coloredCategoryIcons && fallHasColor)
-                        ? fallRgb
+                    const std::uint32_t iconRgb = hasFallIcon
+                        ? (a_cfg.coloredCategoryIcons ? (fallHasColor ? fallRgb : 0xFFFFFFu) : a_cfg.modernIconColor)
                         : baseColorRgb;
                     if (hasFallIcon) {
                         DrawFallUIQuad(
@@ -1744,11 +1931,14 @@ namespace MenuFrameworkUI
                 for (std::size_t i = 0; i < buttons.size(); ++i) {
                     keyTxts[i] = buttons[i].key.empty() ? FallbackKeyForIndex(i) : buttons[i].key;
                     keySpans[i] = MeasureKeySpanW(a_baseFont, btnBadgeSize, btnKeyTextScale, a_cfg.buttonIconStyle, keyTxts[i]);
+                    const float holdPad = buttons[i].requiresHold
+                        ? ((a_cfg.holdRingStyle == 0 ? 6.5f : 5.0f) * qcScale)
+                        : 0.0f;
                     singleBtnH = std::max(
                         singleBtnH,
-                        MeasureKeyBadgeH(a_baseFont, btnBadgeSize, btnKeyTextScale, a_cfg.buttonIconStyle, keyTxts[i]));
+                        MeasureKeyBadgeH(a_baseFont, btnBadgeSize, btnKeyTextScale, a_cfg.buttonIconStyle, keyTxts[i]) + holdPad);
                     labelSzs[i] = MeasureTextScaled(a_baseFont, btnLabelFontSize, buttons[i].label.c_str());
-                    btnWidths[i] = keySpans[i] + itemGap + labelSzs[i].x;
+                    btnWidths[i] = keySpans[i] + holdPad + itemGap + labelSzs[i].x;
                     maxSingleBtnW = std::max(maxSingleBtnW, btnWidths[i]);
                     inlineBtnW += btnWidths[i];
                     if (i + 1 < buttons.size()) {
@@ -1808,12 +1998,27 @@ namespace MenuFrameworkUI
                     for (std::size_t i = 0; i < buttons.size(); ++i) {
                         const float alphaMult = buttons[i].enabled ? 1.0f : 0.45f;
                         const float btnCenterY = curY + singleBtnH * 0.5f;
-                        float curX = x + padX;
+                        const float holdEdgePad = buttons[i].requiresHold
+                            ? ((a_cfg.holdRingStyle == 0 ? 3.25f : 2.5f) * qcScale)
+                            : 0.0f;
+                        float curX = x + padX + holdEdgePad;
+                        const ImGuiMCP::ImVec2 badgeCenter{ curX + keySpans[i] * 0.5f, btnCenterY };
                         DrawKeycapOrGamepadBadge(
-                            a_dl, a_baseFont, { curX + keySpans[i] * 0.5f, btnCenterY },
+                            a_dl, a_baseFont, badgeCenter,
                             btnBadgeSize, btnKeyTextScale, a_cfg.buttonIconStyle, keyTxts[i],
                             i, rounding, useTextShadow, overallAlpha * alphaMult);
-                        curX += keySpans[i] + itemGap;
+                        if (buttons[i].requiresHold) {
+                            const float liveProg = HUDController::Controller::GetSingleton().GetLiveHoldProgress(buttons[i].holdSlot);
+                            const float ringProg = std::max(buttons[i].holdProgress, liveProg);
+                            const bool btnCrime = useCrimeColor ||
+                                                  (a_cfg.highlightCrimePrompts && HUDController::IsCrimeActionVerb(buttons[i].label));
+                            const std::uint32_t ringRgb = btnCrime ? a_cfg.crimeTextColor : a_cfg.modernAccentColor;
+                            DrawHoldProgressRing(
+                                a_dl, a_baseFont, badgeCenter,
+                                btnBadgeSize, btnKeyTextScale, a_cfg.buttonIconStyle, keyTxts[i],
+                                i, rounding, qcScale, ringProg, a_cfg.holdRingStyle, btnCrime, ringRgb, overallAlpha * alphaMult);
+                        }
+                        curX += keySpans[i] + holdEdgePad + itemGap;
                         DrawTextShadowed(
                             a_dl, a_baseFont, btnLabelFontSize, { curX, btnCenterY - labelSzs[i].y * 0.5f },
                             MakeRgbCol(qcBtnTextRgb, overallAlpha * alphaMult),
@@ -1825,11 +2030,27 @@ namespace MenuFrameworkUI
                     const float btnCenterY = curY + singleBtnH * 0.5f;
                     for (std::size_t i = 0; i < buttons.size(); ++i) {
                         const float alphaMult = buttons[i].enabled ? 1.0f : 0.45f;
+                        const float holdEdgePad = buttons[i].requiresHold
+                            ? ((a_cfg.holdRingStyle == 0 ? 3.25f : 2.5f) * qcScale)
+                            : 0.0f;
+                        curX += holdEdgePad;
+                        const ImGuiMCP::ImVec2 badgeCenter{ curX + keySpans[i] * 0.5f, btnCenterY };
                         DrawKeycapOrGamepadBadge(
-                            a_dl, a_baseFont, { curX + keySpans[i] * 0.5f, btnCenterY },
+                            a_dl, a_baseFont, badgeCenter,
                             btnBadgeSize, btnKeyTextScale, a_cfg.buttonIconStyle, keyTxts[i],
                             i, rounding, useTextShadow, overallAlpha * alphaMult);
-                        curX += keySpans[i] + itemGap;
+                        if (buttons[i].requiresHold) {
+                            const float liveProg = HUDController::Controller::GetSingleton().GetLiveHoldProgress(buttons[i].holdSlot);
+                            const float ringProg = std::max(buttons[i].holdProgress, liveProg);
+                            const bool btnCrime = useCrimeColor ||
+                                                  (a_cfg.highlightCrimePrompts && HUDController::IsCrimeActionVerb(buttons[i].label));
+                            const std::uint32_t ringRgb = btnCrime ? a_cfg.crimeTextColor : a_cfg.modernAccentColor;
+                            DrawHoldProgressRing(
+                                a_dl, a_baseFont, badgeCenter,
+                                btnBadgeSize, btnKeyTextScale, a_cfg.buttonIconStyle, keyTxts[i],
+                                i, rounding, qcScale, ringProg, a_cfg.holdRingStyle, btnCrime, ringRgb, overallAlpha * alphaMult);
+                        }
+                        curX += keySpans[i] + holdEdgePad + itemGap;
                         DrawTextShadowed(
                             a_dl, a_baseFont, btnLabelFontSize, { curX, btnCenterY - labelSzs[i].y * 0.5f },
                             MakeRgbCol(qcBtnTextRgb, overallAlpha * alphaMult),
@@ -1941,7 +2162,43 @@ namespace MenuFrameworkUI
 
             const float iconGap = 5.0f * qcScale;
             const float iconColSpan = hasRowIcons ? (iconColW + iconGap) : 0.0f;
-            const float availRowW = fixedInnerW - rowTextIndent - iconColSpan - 4.0f * qcScale;
+
+            const bool showRowCondition = (a_cfg.itemConditionDisplay != 0);
+            const float condFontSize = std::max(9.0f, rowFontSize * 0.85f);
+            const float condBarW = 36.0f * qcScale;
+            const float condBarH = std::max(4.0f, 4.5f * qcScale);
+            const float condInnerGap = 5.0f * qcScale;
+            bool anyRowCondition = false;
+            std::vector<std::string> rowCondTxts(qc.items.size());
+            std::vector<ImGuiMCP::ImVec2> rowCondTxtSzs(qc.items.size());
+            if (showRowCondition) {
+                for (int i = 0; i < visibleCount; ++i) {
+                    const std::size_t idx = static_cast<std::size_t>(i);
+                    if (qc.items[idx].hasCondition) {
+                        anyRowCondition = true;
+                        if (a_cfg.itemConditionDisplay == 2 || a_cfg.itemConditionDisplay == 3) {
+                            rowCondTxts[idx] = TargetInfo::FormatConditionPercent(qc.items[idx].conditionPercent);
+                            rowCondTxtSzs[idx] = MeasureTextScaled(a_baseFont, condFontSize, rowCondTxts[idx].c_str());
+                        }
+                    }
+                }
+            }
+            float condColW = 0.0f;
+            if (anyRowCondition) {
+                const float maxPctW = (a_cfg.itemConditionDisplay == 2 || a_cfg.itemConditionDisplay == 3)
+                    ? MeasureTextScaled(a_baseFont, condFontSize, "100%").x
+                    : 0.0f;
+                if (a_cfg.itemConditionDisplay == 1) {
+                    condColW = condBarW;
+                } else if (a_cfg.itemConditionDisplay == 2) {
+                    condColW = maxPctW;
+                } else {
+                    condColW = condBarW + condInnerGap + maxPctW;
+                }
+            }
+            const float condColSpan = anyRowCondition ? (condColW + 8.0f * qcScale) : 0.0f;
+
+            const float availRowW = fixedInnerW - rowTextIndent - iconColSpan - condColSpan - 4.0f * qcScale;
             const float rowTextMaxW = fixedWidth ? std::max(12.0f, availRowW) : 0.0f;
             std::vector<std::string> rowTexts;
             std::vector<ImGuiMCP::ImVec2> rowSzs;
@@ -1956,7 +2213,7 @@ namespace MenuFrameworkUI
                 const auto& item = qc.items[idx];
                 std::string label = FormatQuickLootRowLabel(a_baseFont, rowFontSize, item, a_cfg.cleanSorterTags, rowTextMaxW);
                 const auto sz = MeasureTextScaled(a_baseFont, rowFontSize, label.c_str());
-                maxRowW = std::max(maxRowW, sz.x + iconColSpan + 14.0f * qcScale);
+                maxRowW = std::max(maxRowW, sz.x + iconColSpan + condColSpan + 14.0f * qcScale);
                 const bool rowHasIcon = hasRowIcons && (rowFallSlots[idx].valid || !rowIconUtf8[idx].empty());
                 const float iconH = rowHasIcon ? std::max(rowIconSize, rowIconSzs[idx].y) : 0.0f;
                 const float contentH = std::max(sz.y, iconH);
@@ -1984,11 +2241,14 @@ namespace MenuFrameworkUI
             for (std::size_t i = 0; i < buttons.size(); ++i) {
                 btnKeyTxts[i] = buttons[i].key.empty() ? FallbackKeyForIndex(i) : buttons[i].key;
                 keySpans[i] = MeasureKeySpanW(a_baseFont, btnBadgeSize, btnKeyTextScale, a_cfg.buttonIconStyle, btnKeyTxts[i]);
+                const float holdPad = buttons[i].requiresHold
+                    ? ((a_cfg.holdRingStyle == 0 ? 6.5f : 5.0f) * qcScale)
+                    : 0.0f;
                 singleBtnRowH = std::max(
                     singleBtnRowH,
-                    MeasureKeyBadgeH(a_baseFont, btnBadgeSize, btnKeyTextScale, a_cfg.buttonIconStyle, btnKeyTxts[i]));
+                    MeasureKeyBadgeH(a_baseFont, btnBadgeSize, btnKeyTextScale, a_cfg.buttonIconStyle, btnKeyTxts[i]) + holdPad);
                 btnLblSzs[i] = MeasureTextScaled(a_baseFont, btnLabelFontSize, buttons[i].label.c_str());
-                btnItemWidths[i] = keySpans[i] + itemGap * 0.85f + btnLblSzs[i].x;
+                btnItemWidths[i] = keySpans[i] + holdPad + itemGap * 0.85f + btnLblSzs[i].x;
                 unWrappedBtnW += btnItemWidths[i];
                 if (i + 1 < buttons.size()) {
                     unWrappedBtnW += btnGap;
@@ -2119,7 +2379,9 @@ namespace MenuFrameworkUI
                         MakeRgbCol(a_cfg.modernAccentColor, overallAlpha), 2.5f);
                 }
 
-                const float rowAlpha = isSelected ? overallAlpha : (0.88f * overallAlpha);
+                const auto& rowItem = qc.items[uIdx];
+                const bool isBroken = (showRowCondition && rowItem.hasCondition && rowItem.conditionPercent <= 0.01f);
+                const float rowAlpha = (isSelected ? overallAlpha : (0.88f * overallAlpha)) * (isBroken ? 0.55f : 1.0f);
                 const ImGuiMCP::ImU32 rowCol = isSelected
                     ? MakeRgbCol(a_cfg.modernTextColor, rowAlpha)
                     : MakeRgbCol(a_cfg.modernNameColor, rowAlpha);
@@ -2128,6 +2390,47 @@ namespace MenuFrameworkUI
                     { x + pad + rowTextIndent + iconColSpan, curY + (rowH - rowSzs[uIdx].y) * 0.5f },
                     rowCol, rowAlpha, useCaseBShadow, qcScale,
                     rowTexts[uIdx].c_str());
+
+                if (showRowCondition && rowItem.hasCondition) {
+                    const float condPct = std::clamp(rowItem.conditionPercent, 0.0f, 100.0f);
+                    const std::uint32_t normalCondRgb = isSelected ? a_cfg.modernTextColor : a_cfg.infoCardValueColor;
+                    const std::uint32_t condRgb = TargetInfo::GetConditionColorRgb(condPct, normalCondRgb);
+                    const float rightEdge = x + panelW - pad;
+                    const float centerY = curY + rowH * 0.5f;
+
+                    if (a_cfg.itemConditionDisplay == 2 || a_cfg.itemConditionDisplay == 3) {
+                        const float txtX = rightEdge - rowCondTxtSzs[uIdx].x;
+                        const float txtY = centerY - rowCondTxtSzs[uIdx].y * 0.5f;
+                        DrawTextShadowed(
+                            a_dl, a_baseFont, condFontSize,
+                            { txtX, txtY },
+                            MakeRgbCol(condRgb, rowAlpha),
+                            rowAlpha, useCaseBShadow, qcScale,
+                            rowCondTxts[uIdx].c_str());
+                    }
+
+                    if (a_cfg.itemConditionDisplay == 1 || a_cfg.itemConditionDisplay == 3) {
+                        const float barRight = (a_cfg.itemConditionDisplay == 1)
+                            ? rightEdge
+                            : (x + panelW - pad - (condColW - condBarW));
+                        const float barX = barRight - condBarW;
+                        const float barY = centerY - condBarH * 0.5f;
+                        const float barRounding = condBarH * 0.5f;
+                        ImGuiMCP::ImDrawListManager::AddRectFilled(
+                            a_dl, { barX, barY }, { barX + condBarW, barY + condBarH },
+                            MakeCol(0, 0, 0, 0.48f * rowAlpha), barRounding, 0);
+                        const float fillFrac = std::clamp(condPct / 100.0f, 0.0f, 1.0f);
+                        if (fillFrac > 0.0f) {
+                            const float fillW = std::max(2.0f, condBarW * fillFrac);
+                            ImGuiMCP::ImDrawListManager::AddRectFilled(
+                                a_dl, { barX, barY }, { barX + fillW, barY + condBarH },
+                                MakeRgbCol(condRgb, 0.92f * rowAlpha), barRounding, 0);
+                        }
+                        ImGuiMCP::ImDrawListManager::AddRect(
+                            a_dl, { barX, barY }, { barX + condBarW, barY + condBarH },
+                            MakeRgbCol(a_cfg.infoCardBorderColor, 0.28f * rowAlpha), barRounding, 0, 1.0f);
+                    }
+                }
 
                 curY += rowH + rowGap;
             }
@@ -2148,13 +2451,14 @@ namespace MenuFrameworkUI
                         if (uIdx < rowFallSlots.size() && rowFallSlots[uIdx].valid) {
                             const int globalIdx = qc.windowStartIndex + idx;
                             const bool isSelected = (globalIdx == sel);
-                            const float rowAlpha = isSelected ? overallAlpha : (0.88f * overallAlpha);
+                            const bool isBroken =
+                                (showRowCondition && qc.items[uIdx].hasCondition && qc.items[uIdx].conditionPercent <= 0.01f);
+                            const float rowAlpha =
+                                (isSelected ? overallAlpha : (0.88f * overallAlpha)) * (isBroken ? 0.55f : 1.0f);
                             const std::uint32_t fallbackRgb = isSelected ? a_cfg.modernAccentColor : a_cfg.modernIconColor;
-                            const std::uint32_t catRgb = OverlayLayout::GetItemIconColorRgb(
-                                qc.items[uIdx].itemKind, fallbackRgb, a_cfg.coloredCategoryIcons);
-                            const std::uint32_t iconRgb = (a_cfg.coloredCategoryIcons && rowFallHasColor[uIdx])
-                                ? rowFallRgb[uIdx]
-                                : catRgb;
+                            const std::uint32_t iconRgb = a_cfg.coloredCategoryIcons
+                                ? (rowFallHasColor[uIdx] ? rowFallRgb[uIdx] : 0xFFFFFFu)
+                                : fallbackRgb;
                             const float iconCenterX = x + pad + rowTextIndent + iconColW * 0.5f;
                             const float iconPosX = iconCenterX - rowIconSzs[uIdx].x * 0.5f;
                             const float iconPosY = iconCurY + (rowH - rowIconSzs[uIdx].y) * 0.5f;
@@ -2176,7 +2480,10 @@ namespace MenuFrameworkUI
                         if (!rowIconUtf8[uIdx].empty()) {
                             const int globalIdx = qc.windowStartIndex + idx;
                             const bool isSelected = (globalIdx == sel);
-                            const float rowAlpha = isSelected ? overallAlpha : (0.88f * overallAlpha);
+                            const bool isBroken =
+                                (showRowCondition && qc.items[uIdx].hasCondition && qc.items[uIdx].conditionPercent <= 0.01f);
+                            const float rowAlpha =
+                                (isSelected ? overallAlpha : (0.88f * overallAlpha)) * (isBroken ? 0.55f : 1.0f);
                             const std::uint32_t fallbackRgb = isSelected ? a_cfg.modernAccentColor : a_cfg.modernIconColor;
                             const std::uint32_t iconRgb = OverlayLayout::GetItemIconColorRgb(
                                 qc.items[uIdx].itemKind, fallbackRgb, a_cfg.coloredCategoryIcons);
@@ -2205,11 +2512,27 @@ namespace MenuFrameworkUI
                 const float btnCenterY = curY + singleBtnRowH * 0.5f;
                 for (const std::size_t i : fRow) {
                     const float alphaMult = buttons[i].enabled ? 1.0f : 0.45f;
+                    const float holdEdgePad = buttons[i].requiresHold
+                        ? ((a_cfg.holdRingStyle == 0 ? 3.25f : 2.5f) * qcScale)
+                        : 0.0f;
+                    curX += holdEdgePad;
+                    const ImGuiMCP::ImVec2 badgeCenter{ curX + keySpans[i] * 0.5f, btnCenterY };
                     DrawKeycapOrGamepadBadge(
-                        a_dl, a_baseFont, { curX + keySpans[i] * 0.5f, btnCenterY },
+                        a_dl, a_baseFont, badgeCenter,
                         btnBadgeSize, btnKeyTextScale, a_cfg.buttonIconStyle, btnKeyTxts[i],
                         i, rounding, useCaseBShadow, overallAlpha * alphaMult);
-                    curX += keySpans[i] + itemGap * 0.85f;
+                    if (buttons[i].requiresHold) {
+                        const float liveProg = HUDController::Controller::GetSingleton().GetLiveHoldProgress(buttons[i].holdSlot);
+                        const float ringProg = std::max(buttons[i].holdProgress, liveProg);
+                        const bool btnCrime = useCrimeColor ||
+                                              (a_cfg.highlightCrimePrompts && HUDController::IsCrimeActionVerb(buttons[i].label));
+                        const std::uint32_t ringRgb = btnCrime ? a_cfg.crimeTextColor : a_cfg.modernAccentColor;
+                        DrawHoldProgressRing(
+                            a_dl, a_baseFont, badgeCenter,
+                            btnBadgeSize, btnKeyTextScale, a_cfg.buttonIconStyle, btnKeyTxts[i],
+                            i, rounding, qcScale, ringProg, a_cfg.holdRingStyle, btnCrime, ringRgb, overallAlpha * alphaMult);
+                    }
+                    curX += keySpans[i] + holdEdgePad + itemGap * 0.85f;
                     DrawTextShadowed(
                         a_dl, a_baseFont, btnLabelFontSize, { curX, btnCenterY - btnLblSzs[i].y * 0.5f },
                         MakeRgbCol(qcBtnTextRgb, overallAlpha * alphaMult),
@@ -2330,12 +2653,31 @@ namespace MenuFrameworkUI
             float rowsTotalH = 0.0f;
             std::vector<ImGuiMCP::ImVec2> labelSizes(rows.size());
             std::vector<ImGuiMCP::ImVec2> valueSizes(rows.size());
+            std::vector<float> rowHeights(rows.size(), 0.0f);
+            const int cardCondMode = std::clamp(a_cfg.infoCardConditionDisplay, 0, 3);
+            const float cardCondBarW = 54.0f * scale;
+            const float cardCondBarH = std::max(4.5f, 5.5f * scale);
+            const float cardCondGap = 6.0f * scale;
             for (std::size_t i = 0; i < rows.size(); ++i) {
                 labelSizes[i] = MeasureTextScaled(a_baseFont, rowFontSize, rows[i].label.c_str());
-                valueSizes[i] = MeasureTextScaled(a_baseFont, rowFontSize, rows[i].value.c_str());
+                valueSizes[i] = rows[i].value.empty()
+                    ? ImGuiMCP::ImVec2{ 0.0f, 0.0f }
+                    : MeasureTextScaled(a_baseFont, rowFontSize, rows[i].value.c_str());
+                float rowValW = valueSizes[i].x;
+                float rowValH = valueSizes[i].y;
+                if (rows[i].isCondition && a_snap.target.hasCondition && cardCondMode != 0) {
+                    if (cardCondMode == 1) {
+                        rowValW = cardCondBarW;
+                        rowValH = cardCondBarH;
+                    } else if (cardCondMode == 3) {
+                        rowValW = cardCondBarW + cardCondGap + valueSizes[i].x;
+                        rowValH = std::max(valueSizes[i].y, cardCondBarH);
+                    }
+                }
+                rowHeights[i] = std::max(labelSizes[i].y, rowValH);
                 maxLabelW = std::max(maxLabelW, labelSizes[i].x);
-                maxValW = std::max(maxValW, valueSizes[i].x);
-                rowsTotalH += std::max(labelSizes[i].y, valueSizes[i].y);
+                maxValW = std::max(maxValW, rowValW);
+                rowsTotalH += rowHeights[i];
                 if (i + 1 < rows.size()) {
                     rowsTotalH += rowGap;
                 }
@@ -2382,8 +2724,8 @@ namespace MenuFrameworkUI
             if (iconSz.x > 0.0f) {
                 const std::uint32_t baseCardRgb = OverlayLayout::GetItemIconColorRgb(
                     a_snap.target.itemKind, a_cfg.infoCardAccentColor, a_cfg.coloredCategoryIcons);
-                const std::uint32_t cardIconRgb = (hasFallCardIcon && a_cfg.coloredCategoryIcons && fallCardHasColor)
-                    ? fallCardRgb
+                const std::uint32_t cardIconRgb = hasFallCardIcon
+                    ? (a_cfg.coloredCategoryIcons ? (fallCardHasColor ? fallCardRgb : 0xFFFFFFu) : baseCardRgb)
                     : baseCardRgb;
                 if (hasFallCardIcon) {
                     DrawFallUIQuad(
@@ -2422,20 +2764,57 @@ namespace MenuFrameworkUI
             cursorY += dividerGap;
 
             for (std::size_t i = 0; i < rows.size(); ++i) {
+                const float rowH = rowHeights[i];
                 DrawTextShadowed(
                     a_dl, a_baseFont, rowFontSize,
-                    { rect.x + pad, cursorY },
+                    { rect.x + pad, cursorY + (rowH - labelSizes[i].y) * 0.5f },
                     MakeRgbCol(a_cfg.infoCardLabelColor, overallAlpha),
                     overallAlpha, textShadow, scale, rows[i].label.c_str());
 
-                const float valX = rect.x + rect.w - pad - valueSizes[i].x;
-                DrawTextShadowed(
-                    a_dl, a_baseFont, rowFontSize,
-                    { valX, cursorY },
-                    MakeRgbCol(a_cfg.infoCardValueColor, overallAlpha),
-                    overallAlpha, textShadow, scale, rows[i].value.c_str());
+                const float rightEdge = rect.x + rect.w - pad;
+                if (rows[i].isCondition && a_snap.target.hasCondition && cardCondMode != 0) {
+                    const float condPct = std::clamp(a_snap.target.conditionPercent, 0.0f, 100.0f);
+                    const std::uint32_t condRgb = TargetInfo::GetConditionColorRgb(condPct, a_cfg.infoCardValueColor);
 
-                cursorY += std::max(labelSizes[i].y, valueSizes[i].y) + rowGap;
+                    if ((cardCondMode == 2 || cardCondMode == 3) && !rows[i].value.empty()) {
+                        const float valX = rightEdge - valueSizes[i].x;
+                        DrawTextShadowed(
+                            a_dl, a_baseFont, rowFontSize,
+                            { valX, cursorY + (rowH - valueSizes[i].y) * 0.5f },
+                            MakeRgbCol(condRgb, overallAlpha),
+                            overallAlpha, textShadow, scale, rows[i].value.c_str());
+                    }
+                    if (cardCondMode == 1 || cardCondMode == 3) {
+                        const float barRight = (cardCondMode == 1)
+                            ? rightEdge
+                            : (rightEdge - valueSizes[i].x - cardCondGap);
+                        const float barX = barRight - cardCondBarW;
+                        const float barY = cursorY + (rowH - cardCondBarH) * 0.5f;
+                        const float barRounding = cardCondBarH * 0.5f;
+                        ImGuiMCP::ImDrawListManager::AddRectFilled(
+                            a_dl, { barX, barY }, { barX + cardCondBarW, barY + cardCondBarH },
+                            MakeCol(0, 0, 0, 0.48f * overallAlpha), barRounding, 0);
+                        const float fillFrac = std::clamp(condPct / 100.0f, 0.0f, 1.0f);
+                        if (fillFrac > 0.0f) {
+                            const float fillW = std::max(2.0f, cardCondBarW * fillFrac);
+                            ImGuiMCP::ImDrawListManager::AddRectFilled(
+                                a_dl, { barX, barY }, { barX + fillW, barY + cardCondBarH },
+                                MakeRgbCol(condRgb, 0.92f * overallAlpha), barRounding, 0);
+                        }
+                        ImGuiMCP::ImDrawListManager::AddRect(
+                            a_dl, { barX, barY }, { barX + cardCondBarW, barY + cardCondBarH },
+                            MakeRgbCol(a_cfg.infoCardBorderColor, 0.28f * overallAlpha), barRounding, 0, 1.0f);
+                    }
+                } else if (!rows[i].value.empty()) {
+                    const float valX = rightEdge - valueSizes[i].x;
+                    DrawTextShadowed(
+                        a_dl, a_baseFont, rowFontSize,
+                        { valX, cursorY + (rowH - valueSizes[i].y) * 0.5f },
+                        MakeRgbCol(a_cfg.infoCardValueColor, overallAlpha),
+                        overallAlpha, textShadow, scale, rows[i].value.c_str());
+                }
+
+                cursorY += rowH + rowGap;
             }
         }
 
@@ -2569,6 +2948,28 @@ namespace MenuFrameworkUI
             return false;
         }
 
+        void HelpTooltip(const char* a_text)
+        {
+            if (!a_text || a_text[0] == '\0' || !g_tooltipsSupported.load(std::memory_order_acquire)) {
+                return;
+            }
+            if (!ImGuiMCP::IsItemHovered()) {
+                return;
+            }
+            if (ImGuiMCP::BeginTooltip()) {
+                const bool wrap = g_tooltipWrapSupported.load(std::memory_order_acquire);
+                if (wrap) {
+                    const float fontSize = std::max(14.0f, ImGuiMCP::GetFontSize());
+                    ImGuiMCP::PushTextWrapPos(fontSize * 28.0f);
+                }
+                ImGuiMCP::TextUnformatted(a_text);
+                if (wrap) {
+                    ImGuiMCP::PopTextWrapPos();
+                }
+                ImGuiMCP::EndTooltip();
+            }
+        }
+
         void DrawActionButtons(Config& a_cfg)
         {
             ImGuiMCP::Separator();
@@ -2584,12 +2985,14 @@ namespace MenuFrameworkUI
                     g_statusMessage = "Failed to save settings.";
                 }
             }
+            HelpTooltip("Write all current settings to Data/MCM/Settings/FloatingActionPrompts.ini so they persist across game restarts.");
 
             ImGuiMCP::SameLine();
             if (ImGuiMCP::Button("Reload from INI")) {
                 a_cfg.LoadAll();
                 g_statusMessage = "Reloaded from INI.";
             }
+            HelpTooltip("Discard unsaved live edits in memory and reload saved values from the INI files on disk.");
 
             ImGuiMCP::SameLine();
             if (ImGuiMCP::Button("Reset Defaults")) {
@@ -2600,6 +3003,7 @@ namespace MenuFrameworkUI
                     g_statusMessage = "Defaults restored (save failed).";
                 }
             }
+            HelpTooltip("Restore all settings in every tab back to the mod defaults and save immediately.");
 
             if (!g_statusMessage.empty()) {
                 ImGuiMCP::Text("%s", g_statusMessage.c_str());
@@ -2611,26 +3015,158 @@ namespace MenuFrameworkUI
             auto& cfg = Config::GetSingleton();
             ConfigData data = cfg.GetSnapshot();
 
+            ImGuiMCP::Text("Tip: Hover any option to see what it changes in-game.");
+            ImGuiMCP::Separator();
+
             bool changed = false;
             changed |= ImGuiMCP::Checkbox("Enable Floating Prompts", &data.enabled);
+            HelpTooltip("Master switch for 3D floating interaction prompts. On = anchor prompts directly onto doors, items, NPCs, and containers in world space. Off = restore fixed vanilla HUD prompts.");
             changed |= ImGuiMCP::Checkbox("Bypass in Power Armor", &data.powerArmorBypass);
+            HelpTooltip("On = keep fixed vanilla visor prompt placement while wearing Power Armor. Off = continue floating prompts in 3D inside Power Armor.");
             changed |= ImGuiMCP::Checkbox("Clamp to Screen Edges", &data.enableClamping);
+            HelpTooltip("On = keep prompts clamped inside the Edge Margin when an object sits near or outside the screen border. Off = let prompts follow objects off-screen.");
             changed |= ImGuiMCP::SliderFloat("Smoothing Speed", &data.smoothingSpeed, 0.05f, 1.0f, "%.2f");
+            HelpTooltip("How quickly the floating prompt catches up to target screen movement each frame. Increase (e.g. 0.70-1.00) for instant, locked-on tracking; decrease (e.g. 0.15) for softer, slower gliding.");
             changed |= ImGuiMCP::SliderFloat("Edge Margin (px)", &data.edgeMargin, 0.0f, 400.0f, "%.0f");
+            HelpTooltip("Minimum distance in pixels from screen borders when clamping is active. Increase (e.g. 100 px) to keep prompts closer to the center; decrease (e.g. 20 px) to let them get closer to screen edges.");
 
             ImGuiMCP::Separator();
             ImGuiMCP::Text("Companion Prompts");
             changed |= ImGuiMCP::Checkbox("Limit Companion Prompt Distance", &data.limitCompanionPromptDistance);
+            HelpTooltip("On = hide follower/companion prompts unless you stand within Max Distance (vanilla lets companions intercept prompts up to ~180 units away). Off = always use vanilla companion range.");
             if (data.limitCompanionPromptDistance) {
                 changed |= ImGuiMCP::SliderFloat("Max Distance (units)", &data.companionMaxDistance, 50.0f, 500.0f, "%.0f");
+                HelpTooltip("Maximum distance in game units for companion prompts outside combat (default 120; vanilla ~180). Increase to talk/trade from farther away; decrease (e.g. 80) to require standing right next to them.");
                 changed |= ImGuiMCP::SliderFloat("Combat Max Distance (0 = Hide)", &data.companionCombatMaxDistance, 0.0f, 500.0f, "%.0f");
+                HelpTooltip("Maximum distance for companion prompts while in combat. Set to 0 to completely suppress companion Talk/Trade prompts in fights (Revive/Stimpak always works); increase (e.g. 120) to allow combat commands.");
                 changed |= ImGuiMCP::Checkbox("Prevent Companion Stealing Loot Focus", &data.companionDeprioritizeLoot);
+                HelpTooltip("On = remove the wide companion pick radius so followers standing beside containers or corpses cannot steal your crosshair focus while looting.");
                 changed |= ImGuiMCP::Checkbox("Block Hidden Companion Interactions (E / R)", &data.blockHiddenCompanionInteractions);
+                HelpTooltip("On = when a companion prompt is hidden by distance or combat rules, pressing E (Talk) or R (Trade) is blocked on them so R still reloads or draws/holsters your weapon normally.");
             }
 
             ImGuiMCP::Separator();
             ImGuiMCP::Text("Interaction & Grab");
             changed |= ImGuiMCP::SliderFloat("Hold Time to Grab Objects / Corpses (sec)", &data.grabHoldDelay, 0.30f, 2.00f, "%.2f");
+            HelpTooltip("Seconds E / Activate must be held before grabbing and dragging loose objects or corpses (vanilla is ~0.30s). Increase (e.g. 1.50s) to stop accidentally dragging bodies while fast-looting; decrease for faster pickup.");
+            changed |= ImGuiMCP::SliderInt("Featured Item Popup Grace (ms)", &data.featuredItemGraceMs, 0, 2000, "%d ms", 0);
+            HelpTooltip("Minimum time in ms after taking a magazine, bobblehead, or legendary item before E/Enter can close its showcase popup. Increase (e.g. 800 ms) to stop fast-loot E taps from skipping bonuses; set 0 to disable.");
+            changed |= ImGuiMCP::Checkbox("Hide Prompts Blocked by Solid Walls", &data.blockPromptsThroughWalls);
+            HelpTooltip("On = hide floating prompts and QuickLoot when solid walls or terrain block line of sight from your eyes/camera to the target. Off = allow prompts to appear on occluded targets.");
+
+            if (changed) {
+                cfg.ApplySnapshot(data, true);
+            }
+
+            DrawActionButtons(cfg);
+        }
+
+        void __stdcall RenderInteraction()
+        {
+            auto& cfg = Config::GetSingleton();
+            ConfigData data = cfg.GetSnapshot();
+
+            ImGuiMCP::Text("Tip: Hover any option to see what it changes in-game.");
+            ImGuiMCP::Separator();
+
+            bool changed = false;
+
+            ImGuiMCP::Text("Aiming (ADS) & NPC Distance");
+            static constexpr const char* kAimingModes[] = {
+                "Off (Always Show Prompts)",
+                "Hide NPC Prompts While Aiming",
+                "Hide All Prompts While Aiming"
+            };
+            changed |= ImGuiMCP::Combo("Aiming Prompt Behavior", &data.aimingPromptMode, kAimingModes, 3, -1);
+            HelpTooltip("Controls prompts while aiming down sights (ADS): Off = always show; Hide NPC Prompts = hide distracting NPC prompts when aiming a weapon; Hide All = keep aim completely clean during ADS.");
+            changed |= ImGuiMCP::Checkbox("Limit Non-Companion NPC Distance", &data.limitNpcPromptDistance);
+            HelpTooltip("On = hide close-range NPC prompts (Talk, Pickpocket, Trade) beyond Max NPC Close-Action Distance so distant NPCs do not pop up unuseable prompts. Off = keep vanilla NPC range.");
+            if (data.limitNpcPromptDistance) {
+                changed |= ImGuiMCP::SliderFloat("Max NPC Close-Action Distance", &data.npcMaxDistance, 60.0f, 500.0f, "%.0f");
+                HelpTooltip("Maximum reach in game units for close NPC interactions (Talk / Pickpocket). Increase (e.g. 250) to see prompts earlier; decrease (e.g. 140) so prompts only show within actual touch reach.");
+                changed |= ImGuiMCP::Checkbox("Keep Ranged Actions (Intimidate / Overture)", &data.npcKeepRangedActions);
+                HelpTooltip("On = keep perk/mod ranged NPC prompts (Intimidate, Pacify, Incite, Overture) visible from afar even while Talk/Pickpocket stay hidden beyond close reach.");
+                if (data.npcKeepRangedActions) {
+                    changed |= ImGuiMCP::SliderFloat("Ranged NPC Action Max Distance (0 = Unlimited)", &data.npcRangedMaxDistance, 0.0f, 2000.0f, "%.0f");
+                    HelpTooltip("Maximum range for ranged NPC actions like Intimidate or Overture. Set to 0 for unlimited vanilla range; decrease (e.g. 450) to hide them on very distant enemies.");
+                }
+            }
+
+            ImGuiMCP::Separator();
+            ImGuiMCP::Text("Third-Person Character Proximity Assist");
+            changed |= ImGuiMCP::Checkbox("Enable 3rd-Person Character Assist", &data.tpAssistEnabled);
+            HelpTooltip("On = in 3rd person (not aiming), detect nearby interactables in front of your character even when the crosshair is slightly off-target. Off = require exact crosshair aim.");
+            if (data.tpAssistEnabled) {
+                static constexpr const char* kTpModes[] = {
+                    "Fallback Only (Crosshair Empty)",
+                    "Smart Hybrid (Prioritize Close Items)"
+                };
+                changed |= ImGuiMCP::Combo("Assist Mode##TpAssist", &data.tpAssistMode, kTpModes, 2, -1);
+                HelpTooltip("Fallback Only = triggers only when the crosshair has no target (minimal intrusion). Smart Hybrid = also prioritizes very close items near your feet if your crosshair is aimed at something far (>155 units).");
+                changed |= ImGuiMCP::SliderFloat("Max Assist Distance (units)", &data.tpAssistMaxDistance, 60.0f, 250.0f, "%.0f");
+                HelpTooltip("Search radius around the player character in 3rd person. Increase (e.g. 170) to pick up nearby objects from slightly farther away; decrease (e.g. 90) to detect only what is right in front of you.");
+                changed |= ImGuiMCP::SliderFloat("Forward Cone Half-Angle (deg)", &data.tpAssistConeDegrees, 20.0f, 90.0f, "%.0f");
+                HelpTooltip("Half-angle cone in front of your character/camera. Increase (e.g. 75 deg) to catch items wider to the sides; decrease (e.g. 35 deg) to focus strictly straight ahead.");
+                changed |= ImGuiMCP::SliderInt("Target Lock / Anti-Flicker (ms)", &data.tpAssistLockMs, 0, 1000, "%d ms", 0);
+                HelpTooltip("Minimum time in ms before assist switches between neighboring objects. Increase (e.g. 400 ms) if prompts alternate when crouching near cluttered shelves; decrease (e.g. 100 ms) for faster switching.");
+                changed |= ImGuiMCP::Checkbox("Loose Items##TpAssist", &data.tpAssistItems);
+                HelpTooltip("Allow 3rd-person proximity assist to target loose items (weapons, ammo, junk, aid, magazines).");
+                ImGuiMCP::SameLine();
+                changed |= ImGuiMCP::Checkbox("Doors / Activators##TpAssist", &data.tpAssistDoors);
+                HelpTooltip("Allow 3rd-person proximity assist to target doors, buttons, switches, and named activators.");
+                changed |= ImGuiMCP::Checkbox("Furniture / Terminals##TpAssist", &data.tpAssistFurniture);
+                HelpTooltip("Allow 3rd-person proximity assist to target chairs, beds, workbenches, and terminals.");
+                ImGuiMCP::SameLine();
+                changed |= ImGuiMCP::Checkbox("Containers (E Opens Transfer)##TpAssist", &data.tpAssistContainers);
+                HelpTooltip("Allow 3rd-person proximity assist to target containers/corpses (pressing E opens full Transfer/Loot since QuickLoot requires direct crosshair focus).");
+            }
+
+            ImGuiMCP::Separator();
+            ImGuiMCP::Text("Hold-to-Activate Protection");
+            changed |= ImGuiMCP::Checkbox("Enable Hold-to-Activate", &data.holdToActivateEnabled);
+            HelpTooltip("On = require holding the button instead of tapping for chosen risky/accidental actions (shown with a progress ring in Modern style). Off = all actions trigger on a single tap.");
+            if (data.holdToActivateEnabled) {
+                changed |= ImGuiMCP::SliderFloat("Hold Duration (sec)", &data.holdToActivateDuration, 0.20f, 2.00f, "%.2f");
+                HelpTooltip("How long you must hold the action key before activation fires. Increase (e.g. 0.80s) for stronger protection against accidental clicks; decrease (e.g. 0.30s) for snappier deliberate holds.");
+                static constexpr const char* kRingStyles[] = {
+                    "Monochrome (White Ring)",
+                    "Accent Color"
+                };
+                changed |= ImGuiMCP::Combo("Hold Ring Style", &data.holdRingStyle, kRingStyles, 2, -1);
+                HelpTooltip("Visual style of the circular/rounded hold indicator around key badges: Monochrome = crisp white arc with dark casing; Accent Color = uses your configured Accent / Selection Color.");
+                changed |= ImGuiMCP::Checkbox("Drink (Water / Sinks / Puddles)", &data.holdDrink);
+                HelpTooltip("Require holding E when drinking dirty water from sinks, pumps, puddles, or Activate water sources.");
+                ImGuiMCP::SameLine();
+                changed |= ImGuiMCP::Checkbox("Sit / Sleep (Chairs / Beds)", &data.holdSitSleep);
+                HelpTooltip("Require holding E before sitting in chairs/benches or sleeping in beds, preventing accidental animations mid-combat or mid-looting.");
+                changed |= ImGuiMCP::Checkbox("Steal / Pickpocket", &data.holdStealPickpocket);
+                HelpTooltip("Require holding E/R before committing crimes (Steal, Steal From, Pickpocket) so you do not accidentally turn NPCs hostile.");
+                ImGuiMCP::SameLine();
+                changed |= ImGuiMCP::Checkbox("Eat / Cannibal", &data.holdEatCannibal);
+                HelpTooltip("Require holding to Eat world food directly or perform Cannibal / Corpse feeding actions.");
+                changed |= ImGuiMCP::Checkbox("Workbenches / Power Armor", &data.holdCraftPowerArmor);
+                HelpTooltip("Require holding when crafting at workbenches or entering/modifying Power Armor frames (also works inside QuickLoot workbench prompts).");
+
+                static const bool s_hasInputText = []() {
+                    HMODULE mf = GetModuleHandleW(L"F4SEMenuFramework");
+                    return mf != nullptr && GetProcAddress(mf, "igInputText") != nullptr;
+                }();
+                if (s_hasInputText) {
+                    char buf[261]{};
+                    const std::size_t copyLen = std::min<std::size_t>(data.holdCustomVerbs.size(), sizeof(buf) - 1);
+                    std::memcpy(buf, data.holdCustomVerbs.data(), copyLen);
+                    buf[copyLen] = '\0';
+                    if (ImGuiMCP::InputText("Custom Hold Verbs (comma-separated)", buf, sizeof(buf))) {
+                        data.holdCustomVerbs = buf;
+                        changed = true;
+                    }
+                    HelpTooltip("Comma-separated action verbs (case-insensitive leading verb prefix match) that also require Hold-to-Activate, e.g. 'Arm, Disarm, Detonate'.");
+                } else {
+                    ImGuiMCP::Text("Custom Hold Verbs (INI sHoldCustomVerbs): %s",
+                        data.holdCustomVerbs.empty() ? "(none)" : data.holdCustomVerbs.c_str());
+                    HelpTooltip("Read-only fallback because ImGui InputText is unavailable in this F4SEMenuFramework build. Edit sHoldCustomVerbs in the INI file directly.");
+                }
+            }
 
             if (changed) {
                 cfg.ApplySnapshot(data, true);
@@ -2644,7 +3180,10 @@ namespace MenuFrameworkUI
             auto& cfg = Config::GetSingleton();
             ConfigData data = cfg.GetSnapshot();
 
-            static constexpr const char* kStyles[] = { "Vanilla (Native HUD)", "Modern (GTA 6 Style)" };
+            ImGuiMCP::Text("Tip: Hover any option to see what it changes in-game.");
+            ImGuiMCP::Separator();
+
+            static constexpr const char* kStyles[] = { "Vanilla (Native HUD)", "Modern (Borderless)" };
             static constexpr const char* kButtonIcons[] = {
                 "Keyboard (E / R)",
                 "PlayStation (Colored)",
@@ -2653,7 +3192,7 @@ namespace MenuFrameworkUI
                 "Xbox (Monochrome)"
             };
             static constexpr const char* kTextModes[] = {
-                "Action Only (GTA 6)",
+                "Action Only (Minimal)",
                 "Action + Target Name",
                 "Name on World Objects Only"
             };
@@ -2664,82 +3203,142 @@ namespace MenuFrameworkUI
 
             bool changed = false;
             changed |= ImGuiMCP::Combo("Prompt Style", &data.promptStyle, kStyles, 2, -1);
+            HelpTooltip("Vanilla = moves the native Fallout 4 Scaleform prompt into 3D space (compatible with HUD replacers). Modern (Borderless) = crisp custom ImGui/DirectX overlay with badges, icons, and progress rings.");
             changed |= ImGuiMCP::Combo("Modern Text Mode", &data.modernTextMode, kTextModes, 3, -1);
+            HelpTooltip("Action Only = compact verb badge ('TAKE', 'OPEN'). Action + Target Name = always show verb and item name. Name on World Objects = keep 'TAKE' minimal on loose items, but show full names on doors/NPCs.");
             changed |= ImGuiMCP::Checkbox("Show Destination Map Above Load Doors", &data.showDoorDestination);
+            HelpTooltip("On = display the destination cell/area name above transition doors (e.g. 'COMMONWEALTH', 'DIAMOND CITY') even in Action Only mode.");
+            changed |= ImGuiMCP::Checkbox("Show Name Above Furniture & Activators", &data.showInteractableHeader);
+            HelpTooltip("On = display the object header above chairs, beds, buttons, and workbenches in Action Only mode (e.g. 'SLEEPING BAG', 'POWER ARMOR STATION').");
             changed |= ImGuiMCP::Combo("Multi-Action Layout", &data.multiActionLayout, kMultiActionLayouts, 2, -1);
+            HelpTooltip("How two-button prompts (e.g. Companion Talk/Trade, Water Drink/Fill Bottle, Power Armor Craft/Transfer) are arranged: Stacked Vertical (rows) or Inline Horizontal (side by side).");
             changed |= ImGuiMCP::SliderFloat("Multi-Action Row Spacing (px)", &data.modernActionGap, 0.0f, 24.0f, "%.0f");
+            HelpTooltip("Gap in pixels between multiple simultaneous action rows/columns. Increase (e.g. 10 px) for looser spacing; decrease (e.g. 2 px) for tighter grouping.");
             changed |= ImGuiMCP::Checkbox("Clean FIS / Sorter Tags ([Scrap], {{...}})", &data.cleanSorterTags);
+            HelpTooltip("On = remove visible sorter prefixes/tags like [Junk] or {{Aluminum}} from prompt labels, QuickLoot rows, and Info Card titles while still using them to detect FallUI icons.");
             changed |= ImGuiMCP::Combo("Button Icon Style", &data.buttonIconStyle, kButtonIcons, 5, -1);
+            HelpTooltip("Choose whether Modern key badges render as Keyboard keycaps ('E'/'R') or PlayStation/Xbox controller buttons (Colored or Monochrome circles).");
             changed |= ImGuiMCP::SliderFloat("Modern Prompt Opacity", &data.modernOpacity, 0.1f, 1.0f, "%.2f");
+            HelpTooltip("Master alpha opacity for the entire Modern floating prompt. Increase to 1.00 for full visibility; decrease (e.g. 0.50) for a subtle semi-transparent HUD.");
             changed |= ImGuiMCP::Checkbox("Compact Inline Info Line (Scrap / Val / Wt)", &data.inlineItemInfo);
+            HelpTooltip("On = attach a small one-line summary (scrap materials or Value/Weight) directly beneath the prompt pill. Leave Off if you prefer details only inside the Mini Info Card.");
 
             ImGuiMCP::Separator();
             ImGuiMCP::Text("Prompt Sizes, Font & Screen Offset");
             changed |= DrawFontCombo("Prompt Font", data.promptFont);
+            HelpTooltip("Custom .ttf/.otf font used by Modern floating prompts. Drop fonts into Data/F4SE/Plugins/FloatingActionPrompts/Fonts/ and click Refresh Fonts.");
             ImGuiMCP::SameLine();
             if (ImGuiMCP::Button("Refresh Fonts##Prompt")) {
                 (void)DiscoverAvailableFonts(true);
             }
+            HelpTooltip("Rescan Data/F4SE/Plugins/FloatingActionPrompts/Fonts/ and Fallout 4 font folders for newly added .ttf/.otf files.");
             changed |= ImGuiMCP::SliderFloat("Prompt Overall Scale", &data.modernScale, 0.5f, 2.5f, "%.2f");
+            HelpTooltip("Master scale multiplier for every Modern prompt element together. Increase (e.g. 1.25) for larger text and badges on 1440p/4K; decrease (e.g. 0.75) for smaller, sleeker prompts.");
             changed |= ImGuiMCP::SliderFloat("Button / Keycap Size", &data.modernButtonSize, 0.5f, 2.5f, "%.2f");
+            HelpTooltip("Independent size multiplier for keycaps and controller button badges. Increase to make the button icon larger without scaling text; decrease to make it more compact.");
             changed |= ImGuiMCP::SliderFloat("Inner Key Text Size (e.g. 'E')", &data.modernKeyTextScale, 0.40f, 1.20f, "%.2f");
+            HelpTooltip("Relative size of the glyph/symbol inside each button badge (e.g. 'E' or controller symbol). Increase (e.g. 0.95) for bolder inner glyphs; decrease (e.g. 0.65) for more padding inside the badge.");
             changed |= ImGuiMCP::SliderFloat("Action & Name Text Size", &data.modernActionTextScale, 0.5f, 2.5f, "%.2f");
+            HelpTooltip("Independent font scale for action verbs ('TAKE', 'OPEN') and target names. Increase for better readability from couch distance; decrease for compact prompts.");
             changed |= ImGuiMCP::SliderFloat("Category Icon Size", &data.modernIconScale, 0.5f, 2.5f, "%.2f");
+            HelpTooltip("Independent scale for the FallUI/FontAwesome category icon next to the action verb. Increase for larger icons; decrease to make them subtle.");
             changed |= ImGuiMCP::SliderFloat("Screen Offset X (px)", &data.modernScreenOffsetX, -200.0f, 200.0f, "%.0f");
+            HelpTooltip("Horizontal 2D screen shift in pixels after 3D projection. Positive (+X) moves prompts right (useful next to the crosshair); negative (-X) moves them left.");
             changed |= ImGuiMCP::SliderFloat("Screen Offset Y (px)", &data.modernScreenOffsetY, -200.0f, 200.0f, "%.0f");
+            HelpTooltip("Vertical 2D screen shift in pixels after 3D projection. Positive (+Y) moves prompts lower on screen; negative (-Y) moves them higher.");
 
             ImGuiMCP::Separator();
             static constexpr const char* kIconLibraries[] = {
                 "FontAwesome (Built-in)",
-                "FallUI Icon Library + Expansion"
+                "FallUI / FIS Icon Library + Addons"
             };
             changed |= ImGuiMCP::Combo("Icon Library", &data.iconLibrary, kIconLibraries, 2, -1);
+            HelpTooltip("FontAwesome = built-in vector glyphs (works standalone). FallUI / FIS + Addons = reads your installed FallUI_IconLib.swf, FIS XML tags (incl. Modern Age Icons), and FallUIIconLibrary.ini palette.");
             if (data.iconLibrary == 1) {
                 const std::string statusTxt = GetFallUIRegistryStatusText();
                 ImGuiMCP::Text("%s", statusTxt.c_str());
             }
             changed |= ImGuiMCP::Checkbox("Show Category Icons (Master Toggle)", &data.modernShowItemIcon);
+            HelpTooltip("Master switch for category icons on Modern floating world prompts. Turn Off to hide all category icons on prompts while keeping QuickLoot icons independent.");
             changed |= ImGuiMCP::Checkbox("Colored Category Icons (FallUI Style)", &data.coloredCategoryIcons);
+            HelpTooltip("On = tint category icons using your FallUIIconLibrary.ini palette (or white for uncolored FallUI icons) or FontAwesome category colors. Off = keep icons monochrome using Category Icon Color.");
             if (data.modernShowItemIcon) {
-                changed |= ImGuiMCP::Checkbox("Weapon", &data.iconWeapon); ImGuiMCP::SameLine();
-                changed |= ImGuiMCP::Checkbox("Armor", &data.iconArmor); ImGuiMCP::SameLine();
-                changed |= ImGuiMCP::Checkbox("Aid / Chem", &data.iconAid); ImGuiMCP::SameLine();
+                changed |= ImGuiMCP::Checkbox("Weapon", &data.iconWeapon);
+                HelpTooltip("Show category icon on Modern prompts for weapons and explosives.");
+                ImGuiMCP::SameLine();
+                changed |= ImGuiMCP::Checkbox("Armor", &data.iconArmor);
+                HelpTooltip("Show category icon on Modern prompts for armor and clothing.");
+                ImGuiMCP::SameLine();
+                changed |= ImGuiMCP::Checkbox("Aid / Chem", &data.iconAid);
+                HelpTooltip("Show category icon on Modern prompts for chems, stimpaks, food, and drinks.");
+                ImGuiMCP::SameLine();
                 changed |= ImGuiMCP::Checkbox("Ammo", &data.iconAmmo);
+                HelpTooltip("Show category icon on Modern prompts for ammunition.");
 
-                changed |= ImGuiMCP::Checkbox("Misc / Junk", &data.iconMiscJunk); ImGuiMCP::SameLine();
-                changed |= ImGuiMCP::Checkbox("Key", &data.iconKey); ImGuiMCP::SameLine();
-                changed |= ImGuiMCP::Checkbox("Book / Note", &data.iconBookNote); ImGuiMCP::SameLine();
+                changed |= ImGuiMCP::Checkbox("Misc / Junk", &data.iconMiscJunk);
+                HelpTooltip("Show category icon on Modern prompts for misc items, junk, and mods.");
+                ImGuiMCP::SameLine();
+                changed |= ImGuiMCP::Checkbox("Key", &data.iconKey);
+                HelpTooltip("Show category icon on Modern prompts for keys and passcards.");
+                ImGuiMCP::SameLine();
+                changed |= ImGuiMCP::Checkbox("Book / Note", &data.iconBookNote);
+                HelpTooltip("Show category icon on Modern prompts for magazines, notes, and books.");
+                ImGuiMCP::SameLine();
                 changed |= ImGuiMCP::Checkbox("Holotape", &data.iconHolotape);
+                HelpTooltip("Show category icon on Modern prompts for holotapes.");
 
-                changed |= ImGuiMCP::Checkbox("Container", &data.iconContainer); ImGuiMCP::SameLine();
-                changed |= ImGuiMCP::Checkbox("Door", &data.iconDoor); ImGuiMCP::SameLine();
-                changed |= ImGuiMCP::Checkbox("Furniture / Bed", &data.iconFurniture); ImGuiMCP::SameLine();
+                changed |= ImGuiMCP::Checkbox("Container", &data.iconContainer);
+                HelpTooltip("Show category icon on Modern prompts when aiming at containers or lootable bodies (outside QuickLoot).");
+                ImGuiMCP::SameLine();
+                changed |= ImGuiMCP::Checkbox("Door", &data.iconDoor);
+                HelpTooltip("Show category icon on Modern prompts when aiming at doors.");
+                ImGuiMCP::SameLine();
+                changed |= ImGuiMCP::Checkbox("Furniture / Bed", &data.iconFurniture);
+                HelpTooltip("Show category icon on Modern prompts for chairs, beds, and workbenches.");
+                ImGuiMCP::SameLine();
                 changed |= ImGuiMCP::Checkbox("Terminal", &data.iconTerminal);
+                HelpTooltip("Show category icon on Modern prompts when aiming at terminals.");
 
                 changed |= ImGuiMCP::Checkbox("NPC / Companion", &data.iconNpc);
+                HelpTooltip("Show category icon on Modern prompts when targeting NPCs or companions.");
             }
 
             ImGuiMCP::Separator();
             ImGuiMCP::Text("Box, Padding & Shadows");
-            changed |= ImGuiMCP::SliderFloat("Background Opacity (0 = Clean GTA 6)", &data.modernBgOpacity, 0.0f, 1.0f, "%.2f");
+            changed |= ImGuiMCP::SliderFloat("Background Opacity (0 = Transparent)", &data.modernBgOpacity, 0.0f, 1.0f, "%.2f");
+            HelpTooltip("Opacity of the pill backdrop behind Modern prompts. Set 0.00 for a clean borderless look floating directly over the world; increase (e.g. 0.65) for a dark translucent pill box.");
             changed |= ImGuiMCP::Checkbox("Show Prompt Border", &data.modernBorder);
+            HelpTooltip("On = draw a 1px outline around the Modern prompt pill box (most visible when Background Opacity > 0 or Rounding > 0).");
             changed |= ImGuiMCP::Checkbox("Enable Text Drop Shadow", &data.modernTextShadow);
+            HelpTooltip("On = render a soft dark shadow behind prompt text and icons so white borderless text stays legible over bright skies or lights.");
             changed |= ImGuiMCP::SliderFloat("Corner Rounding", &data.modernRounding, 0.0f, 24.0f, "%.0f");
+            HelpTooltip("Corner radius in pixels for prompt boxes and keyboard keycaps. 0 = sharp rectangular corners; increase (e.g. 8-12 px) for pill-shaped rounded corners.");
             changed |= ImGuiMCP::SliderFloat("Horizontal Padding (px)", &data.modernPadX, 0.0f, 32.0f, "%.0f");
+            HelpTooltip("Left/right inner margin inside the Modern prompt box. Increase to widen the backdrop pill; decrease for a tighter fit.");
             changed |= ImGuiMCP::SliderFloat("Vertical Padding (px)", &data.modernPadY, 0.0f, 24.0f, "%.0f");
+            HelpTooltip("Top/bottom inner margin inside the Modern prompt box. Increase for a taller pill; decrease for a slimmer prompt.");
             changed |= ImGuiMCP::SliderFloat("Element Spacing (px)", &data.modernItemGap, 2.0f, 24.0f, "%.0f");
+            HelpTooltip("Horizontal space in pixels between the button badge, category icon, and action text. Increase to spread elements apart; decrease to pack them closer.");
 
             ImGuiMCP::Separator();
             ImGuiMCP::Text("Colors");
             changed |= DrawColorPickerRGB("Action Text Color", data.modernTextColor);
+            HelpTooltip("Color of primary action verbs (e.g. TAKE, OPEN, TALK) when not flagged as a crime/steal action.");
             changed |= DrawColorPickerRGB("Target Name Color", data.modernNameColor);
+            HelpTooltip("Color of the object/target name or header line (e.g. 'DESK FAN', 'COMMONWEALTH').");
             changed |= DrawColorPickerRGB("Category Icon Color", data.modernIconColor);
+            HelpTooltip("Monochrome tint color applied to category icons when Colored Category Icons is Off.");
             changed |= DrawColorPickerRGB("Accent / Selection Color", data.modernAccentColor);
+            HelpTooltip("Highlight color used for QuickLoot selected row framing, inline summary accents, and the Accent Color Hold-to-Activate ring.");
             changed |= DrawColorPickerRGB("Background Color", data.modernBgColor);
+            HelpTooltip("Fill color of the Modern prompt pill box (visible when Background Opacity > 0).");
             changed |= DrawColorPickerRGB("Border Color", data.modernBorderColor);
+            HelpTooltip("Color of the 1px outline around Modern prompt boxes when Show Prompt Border is On.");
             changed |= ImGuiMCP::Checkbox("Highlight Crime / Steal Prompts", &data.highlightCrimePrompts);
+            HelpTooltip("On = tint Steal, Pickpocket, Trespass, and crime container headers/actions with Crime / Steal Text Color so illegal actions stand out immediately.");
             if (data.highlightCrimePrompts) {
                 changed |= DrawColorPickerRGB("Crime / Steal Text Color", data.crimeTextColor);
+                HelpTooltip("Warning color (default red) used for stealing/crime prompts and stolen container headers when Highlight Crime Prompts is On.");
             }
 
             if (changed) {
@@ -2754,6 +3353,9 @@ namespace MenuFrameworkUI
             auto& cfg = Config::GetSingleton();
             ConfigData data = cfg.GetSnapshot();
 
+            ImGuiMCP::Text("Tip: Hover any option to see what it changes in-game.");
+            ImGuiMCP::Separator();
+
             static constexpr const char* kPositions[] = {
                 "Off",
                 "Below Prompt",
@@ -2766,40 +3368,74 @@ namespace MenuFrameworkUI
 
             bool changed = false;
             changed |= ImGuiMCP::Combo("Mini Info Card Position", &data.infoCardPosition, kPositions, 7, -1);
+            HelpTooltip("Choose where the Mini Info Card renders (item stats/scrap or NPC stats), relative to the floating prompt or pinned to a fixed screen corner. Set Off to disable completely.");
             changed |= ImGuiMCP::SliderFloat("Hover Reveal Delay (sec)", &data.infoCardDelaySeconds, 0.0f, 5.0f, "%.1f");
+            HelpTooltip("Seconds you must keep aiming at the same target before the Info Card fades in. Set 0.0 for instant display; increase (e.g. 0.8s) to hide the card during quick looting.");
             changed |= ImGuiMCP::SliderFloat("Card Offset X (px)", &data.infoCardOffsetX, -400.0f, 400.0f, "%.0f");
+            HelpTooltip("Horizontal pixel adjustment added to the Info Card position. Increase (+X) to push the card right / farther from Right-anchored prompts; decrease (-X) to shift left.");
             changed |= ImGuiMCP::SliderFloat("Card Offset Y (px)", &data.infoCardOffsetY, -400.0f, 400.0f, "%.0f");
+            HelpTooltip("Vertical pixel adjustment added to the Info Card position. Increase (+Y) to move the card lower on screen; decrease (-Y) to move it higher.");
             changed |= ImGuiMCP::SliderFloat("Card Scale", &data.infoCardScale, 0.5f, 2.5f, "%.2f");
+            HelpTooltip("Overall size multiplier for the Mini Info Card text, icons, and padding. Increase (e.g. 1.10) for easier reading; decrease (e.g. 0.65) for a compact card.");
             changed |= ImGuiMCP::SliderFloat("Card Overall Opacity", &data.infoCardOpacity, 0.1f, 1.0f, "%.2f");
+            HelpTooltip("Master opacity for the entire Mini Info Card (title, stats, and borders). Increase for full contrast; decrease for a subtle overlay.");
 
             ImGuiMCP::Separator();
             ImGuiMCP::Text("Style, Geometry, Font & Colors");
             changed |= DrawFontCombo("Info Card Font", data.infoCardFont);
+            HelpTooltip("Custom .ttf/.otf font used inside the Mini Info Card. Independent from Prompt and QuickLoot fonts.");
             ImGuiMCP::SameLine();
             if (ImGuiMCP::Button("Refresh Fonts##InfoCard")) {
                 (void)DiscoverAvailableFonts(true);
             }
+            HelpTooltip("Rescan font folders on disk for newly added .ttf/.otf font files.");
             changed |= ImGuiMCP::SliderFloat("Card Background Opacity", &data.infoCardBgOpacity, 0.0f, 1.0f, "%.2f");
+            HelpTooltip("Opacity of the Info Card backdrop fill. Increase (e.g. 0.85) for a dark solid card over bright scenes; decrease toward 0.00 for a transparent floating card.");
             changed |= ImGuiMCP::Checkbox("Show Card Border", &data.infoCardBorder);
+            HelpTooltip("On = draw a subtle 1px border frame around the Mini Info Card.");
             changed |= ImGuiMCP::Checkbox("Show Top Accent Bar", &data.infoCardAccentBar);
+            HelpTooltip("On = draw a colored accent strip along the top edge of the Mini Info Card.");
             changed |= ImGuiMCP::Checkbox("Show Header Icon", &data.infoCardShowIcon);
+            HelpTooltip("On = show the item/NPC category icon next to the title at the top of the Mini Info Card.");
             changed |= ImGuiMCP::SliderFloat("Card Rounding", &data.infoCardRounding, 0.0f, 24.0f, "%.0f");
+            HelpTooltip("Corner radius in pixels for the Mini Info Card box. 0 = sharp edges; higher values = rounder corners.");
             changed |= ImGuiMCP::SliderFloat("Card Padding (px)", &data.infoCardPad, 2.0f, 28.0f, "%.0f");
+            HelpTooltip("Inner margin in pixels between the card border and its contents. Increase for airier spacing; decrease for a tighter card.");
             changed |= ImGuiMCP::SliderFloat("Row Spacing (px)", &data.infoCardRowGap, 0.0f, 16.0f, "%.0f");
+            HelpTooltip("Vertical gap in pixels between each stat/component row. Increase to separate lines cleanly; decrease to make tall cards shorter.");
             changed |= DrawColorPickerRGB("Card Title Color", data.infoCardTitleColor);
+            HelpTooltip("Text color for the target/item title at the top of the Mini Info Card.");
             changed |= DrawColorPickerRGB("Card Label Color", data.infoCardLabelColor);
+            HelpTooltip("Text color for row labels (e.g. Weight, Value, Damage, Health).");
             changed |= DrawColorPickerRGB("Card Value Color", data.infoCardValueColor);
+            HelpTooltip("Text color for numeric values on the right side of each row.");
             changed |= DrawColorPickerRGB("Card Accent Color", data.infoCardAccentColor);
+            HelpTooltip("Color of the top accent strip on the Mini Info Card.");
             changed |= DrawColorPickerRGB("Card Background Color", data.infoCardBgColor);
+            HelpTooltip("Backdrop fill color behind the Mini Info Card.");
             changed |= DrawColorPickerRGB("Card Border Color", data.infoCardBorderColor);
+            HelpTooltip("Color of the outer border line when Show Card Border is On.");
 
             ImGuiMCP::Separator();
             ImGuiMCP::Text("Card Contents");
             changed |= ImGuiMCP::Checkbox("Show Scrap Components", &data.showScrapComponents);
+            HelpTooltip("On = list crafting materials recovered when scrapping junk, weapons, or armor (e.g. Screws, Adhesive, Aluminum).");
             changed |= ImGuiMCP::Checkbox("Show Value & Weight", &data.showItemValueWeight);
+            HelpTooltip("On = display Value (caps), Weight (lbs), and Value/Weight ratio.");
             changed |= ImGuiMCP::Checkbox("Show Weapon & Armor Stats", &data.showWeaponArmorStats);
+            HelpTooltip("On = display Damage and Ammo for weapons, and Armor Rating for armor.");
             changed |= ImGuiMCP::Checkbox("Show NPC Stats (Weapon / HP / AP / DR / ER)", &data.showNpcStats);
+            HelpTooltip("On = show equipped weapon, Health, Action Points, Damage Resist, and Energy Resist when aiming at NPCs.");
             changed |= ImGuiMCP::Checkbox("Show Mini Info Card inside Modern QuickLoot", &data.infoCardInQuickContainer);
+            HelpTooltip("On = display the Mini Info Card next to the Modern QuickLoot list for whichever item is currently highlighted.");
+            static constexpr const char* kInfoCondModes[] = {
+                "Off",
+                "Bar",
+                "Percent",
+                "Bar + Percent"
+            };
+            changed |= ImGuiMCP::Combo("Condition Display (NEC / PA)##InfoCard", &data.infoCardConditionDisplay, kInfoCondModes, 4, -1);
+            HelpTooltip("How item durability/spoilage is shown inside the Mini Info Card for Power Armor pieces and Native Equipment Condition (NEC) weapons/armor/food.");
 
             if (changed) {
                 cfg.ApplySnapshot(data, true);
@@ -2813,42 +3449,73 @@ namespace MenuFrameworkUI
             auto& cfg = Config::GetSingleton();
             ConfigData data = cfg.GetSnapshot();
 
+            ImGuiMCP::Text("Tip: Hover any option to see what it changes in-game.");
+            ImGuiMCP::Separator();
+
             bool changed = false;
             changed |= ImGuiMCP::Checkbox("Float QuickContainer in 3D", &data.floatQuickContainer);
+            HelpTooltip("On = anchor QuickLoot containers, corpses, companions, and workbenches in 3D world space over the object. Off = keep native fixed HUD placement.");
             changed |= ImGuiMCP::Checkbox("Use Modern Style for QuickContainer & Workbenches", &data.modernQuickContainer);
+            HelpTooltip("On (when Prompt Style is Modern) = render the borderless Modern QuickLoot and Workbench UI with icons, NEC condition bars, sorting, and Hold-to-Activate. Off = float/show the native HUD QuickLoot.");
             changed |= ImGuiMCP::SliderFloat("QuickContainer Smoothing", &data.quickContainerSmoothing, 0.05f, 1.0f, "%.2f");
+            HelpTooltip("Frame-to-frame smoothing factor for the floating QuickLoot window. Increase (e.g. 0.60) for snappier tracking; decrease (e.g. 0.15) to reduce motion while turning.");
             changed |= ImGuiMCP::SliderFloat("Scroll Stability Deadzone (px)", &data.quickContainerDeadzone, 0.0f, 30.0f, "%.1f");
+            HelpTooltip("Minimum pixel movement needed before updating the QuickLoot window position. Increase (e.g. 8-12 px) to freeze tiny hand/camera sway while scrolling items; set 0 for zero lag.");
             changed |= DrawVec3Sliders("QuickContainer 3D Offset (X / Y / Z)", data.quickContainerOffset, -100.0f, 100.0f);
+            HelpTooltip("World-space anchor offset applied to floating QuickLoot panels (X = East/West, Y = North/South, Z = Vertical height). Increase Z (e.g. +20) to raise the box higher above chests or corpses; decrease Z to lower it.");
 
             ImGuiMCP::Separator();
             ImGuiMCP::Text("Modern QuickLoot Window, Icons, Font & Sizes");
             static constexpr const char* kQcIconLibraries[] = {
                 "FontAwesome (Built-in)",
-                "FallUI Icon Library + Expansion"
+                "FallUI / FIS Icon Library + Addons"
             };
             changed |= ImGuiMCP::Combo("Icon Library##QuickLoot", &data.iconLibrary, kQcIconLibraries, 2, -1);
+            HelpTooltip("Shared Icon Library setting: FontAwesome = built-in glyphs; FallUI / FIS + Addons = reads FallUI_IconLib.swf, FIS XMLs (e.g. Modern Age Icons), and FallUIIconLibrary.ini palette.");
             if (data.iconLibrary == 1) {
                 const std::string statusTxt = GetFallUIRegistryStatusText();
                 ImGuiMCP::Text("%s", statusTxt.c_str());
             }
             changed |= ImGuiMCP::Checkbox("Show Item Category Icons", &data.qcShowItemIcons);
+            HelpTooltip("On = display a FallUI or FontAwesome icon beside each item row in Modern QuickLoot.");
             ImGuiMCP::SameLine();
             changed |= ImGuiMCP::Checkbox("Colored Icons##QuickLoot", &data.coloredCategoryIcons);
+            HelpTooltip("Shared icon coloring toggle: On = match FallUIIconLibrary.ini palette (or white for uncolored FallUI icons) or FontAwesome category colors; Off = render icons monochrome using Category Icon Color.");
+            static constexpr const char* kCondDisplayModes[] = {
+                "Off",
+                "Bar",
+                "Percent",
+                "Bar + Percent"
+            };
+            changed |= ImGuiMCP::Combo("Item Condition Display (NEC / PA)##QuickLoot", &data.itemConditionDisplay, kCondDisplayModes, 4, -1);
+            HelpTooltip("Choose how durability/condition is rendered inside QuickLoot item rows for Power Armor pieces and Native Equipment Condition (NEC) weapons, armor, and food.");
             changed |= DrawFontCombo("QuickLoot Font", data.qcFont);
+            HelpTooltip("Custom .ttf/.otf font used inside the Modern QuickLoot window. Independent from Prompt and Info Card fonts.");
             ImGuiMCP::SameLine();
             if (ImGuiMCP::Button("Refresh Fonts##QuickLoot")) {
                 (void)DiscoverAvailableFonts(true);
             }
+            HelpTooltip("Rescan font folders on disk for newly added .ttf/.otf font files.");
             changed |= ImGuiMCP::SliderFloat("QuickLoot Overall Scale", &data.qcScale, 0.5f, 2.5f, "%.2f");
+            HelpTooltip("Master scale multiplier for the Modern QuickLoot window. Increase (e.g. 1.20) for larger rows and text; decrease (e.g. 0.80) for a smaller compact window.");
             changed |= ImGuiMCP::SliderFloat("Fixed Window Width (0 = Auto, px)", &data.qcWidth, 0.0f, 600.0f, "%.0f");
-            changed |= ImGuiMCP::Checkbox("Expand List Beyond 5 Items (Off = Native 5-Slot)", &data.qcExpandInventoryList);
+            HelpTooltip("Lock QuickLoot content width in pixels so long item names never cause the box to resize while scrolling. Increase (e.g. 340 px) for wide modded names; set 0 to auto-size to text.");
+            changed |= ImGuiMCP::Checkbox("Expand List Beyond 5 Items (Off = 5-Row Cap)", &data.qcExpandInventoryList);
+            HelpTooltip("On = allow Modern QuickLoot to display up to Max Visible Rows (3-12) at once. Off = cap visible rows at 5 (custom sorting still applies when Sort Mode is not Vanilla).");
             changed |= ImGuiMCP::SliderInt("Max Visible Rows", &data.qcMaxVisibleRows, 3, 12);
+            HelpTooltip("Maximum number of item rows shown simultaneously in Modern QuickLoot (requires Expand List Beyond 5 Items). Increase (e.g. 8-10) to see more loot without scrolling; decrease (e.g. 4-5) for a compact box.");
             changed |= ImGuiMCP::SliderFloat("Row Height Padding (px)", &data.qcRowHeightPad, 0.0f, 20.0f, "%.0f");
+            HelpTooltip("Extra vertical spacing inside each item row. Increase (e.g. 6 px) for taller, easier-to-read rows; decrease to fit more rows in less vertical space.");
             changed |= ImGuiMCP::SliderFloat("Header Title Size", &data.qcHeaderTextScale, 0.5f, 2.5f, "%.2f");
+            HelpTooltip("Independent font scale for the container/corpse title at the top of QuickLoot.");
             changed |= ImGuiMCP::SliderFloat("Item List Text Size", &data.qcItemTextScale, 0.5f, 2.5f, "%.2f");
+            HelpTooltip("Independent font scale for item names and counts in the QuickLoot list.");
             changed |= ImGuiMCP::SliderFloat("QuickLoot Button Size", &data.qcButtonSize, 0.5f, 2.5f, "%.2f");
+            HelpTooltip("Size multiplier for footer action keycaps/badges ('E Take', 'R Transfer') in QuickLoot and Workbenches.");
             changed |= ImGuiMCP::SliderFloat("QuickLoot Inner Key Size", &data.qcKeyTextScale, 0.40f, 1.20f, "%.2f");
+            HelpTooltip("Relative font size of the key character ('E', 'R') inside QuickLoot footer badges.");
             changed |= ImGuiMCP::SliderFloat("QuickLoot Action Label Size", &data.qcButtonTextScale, 0.5f, 2.5f, "%.2f");
+            HelpTooltip("Font scale for footer button labels ('TAKE', 'TRANSFER', 'CRAFT') in QuickLoot and Workbenches.");
 
             ImGuiMCP::Separator();
             ImGuiMCP::Text("QuickLoot Sorting & Priority");
@@ -2862,10 +3529,12 @@ namespace MenuFrameworkUI
                 "Vanilla (Passive Mirror)"
             };
             changed |= ImGuiMCP::Combo("Sort Mode##QuickLoot", &data.qcSortMode, kQcSortModes, 7, -1);
+            HelpTooltip("Primary item sort rule in Modern QuickLoot (for Loot, Turrets, Companions, and Power Armor). Vanilla keeps default engine order; Category Priority uses your custom category ranking below.");
             changed |= ImGuiMCP::SliderInt("Take Anti-Bounce (ms)##QuickLoot", &data.qcTakeDebounceMs, 0, 300, "%d ms", 0);
+            HelpTooltip("Cooldown in ms after releasing E before another QuickLoot Take can fire. Increase (e.g. 60-120 ms) if mechanical key chatter takes two items per press; set 0 for maximum rapid-loot speed.");
 
             if (data.qcSortMode != 6) {
-                ImGuiMCP::Text("Applies to Loot, Turrets & Companions (PA keeps E=Enter). Stealing/Workbenches stay Vanilla.");
+                ImGuiMCP::Text("Applies to Loot, Turrets, Companions & Power Armor (PA keeps E=Enter). Stealing/Workbenches stay Vanilla.");
 
                 if (data.qcSortMode == 0) {
                     static constexpr const char* kQcSecondarySorts[] = {
@@ -2875,15 +3544,20 @@ namespace MenuFrameworkUI
                         "Weight (Low -> High)"
                     };
                     changed |= ImGuiMCP::Combo("Within Category Sort##QuickLoot", &data.qcCategorySecondarySort, kQcSecondarySorts, 4, -1);
+                    HelpTooltip("Tie-breaker sort used to order items inside the same category when Sort Mode is Category Priority.");
                 }
 
                 ImGuiMCP::Text("Top Pins (Order: Quest -> Legendary -> Tagged -> Caps):");
                 changed |= ImGuiMCP::Checkbox("Pin Quest Items##QuickLoot", &data.qcPinQuestItems);
+                HelpTooltip("On = always pin quest-essential items at the very top of QuickLoot regardless of category.");
                 ImGuiMCP::SameLine();
                 changed |= ImGuiMCP::Checkbox("Pin Legendary Items##QuickLoot", &data.qcPinLegendary);
+                HelpTooltip("On = pin Legendary weapons and armor near the top (just below Quest items).");
                 changed |= ImGuiMCP::Checkbox("Pin Tagged for Search##QuickLoot", &data.qcPinTaggedForSearch);
+                HelpTooltip("On = pin Junk/misc items containing components you tagged for search (magnifying glass) near the top.");
                 ImGuiMCP::SameLine();
                 changed |= ImGuiMCP::Checkbox("Pin Caps##QuickLoot", &data.qcPinCaps);
+                HelpTooltip("On = pin Bottlecaps near the top above normal loot.");
 
                 if (data.qcSortMode == 0) {
                     static const auto s_uiSupport = []() {
@@ -2938,11 +3612,13 @@ namespace MenuFrameworkUI
                             std::swap(data.qcCategoryOrder[idx], data.qcCategoryOrder[idx - 1]);
                             changed = true;
                         }
+                        HelpTooltip("Move this category higher in priority (rank 1 appears at the top of QuickLoot).");
                         ImGuiMCP::SameLine();
                         if (pressReorderBtn(downLabel) && i + 1 < static_cast<int>(kQuickLootCategoryCount)) {
                             std::swap(data.qcCategoryOrder[idx], data.qcCategoryOrder[idx + 1]);
                             changed = true;
                         }
+                        HelpTooltip("Move this category lower in priority (rank 19 appears at the bottom of QuickLoot).");
                         ImGuiMCP::SameLine();
 
                         char rowLabel[64]{};
@@ -2979,6 +3655,7 @@ namespace MenuFrameworkUI
                                     ImGuiMCP::EndDragDropTarget();
                                 }
                             }
+                            HelpTooltip("Drag and drop (or use ^ / v) to reorder this category. Top of the list appears first inside QuickLoot.");
                         } else {
                             ImGuiMCP::Text("%d. %s", i + 1, GetQuickLootCategoryLabel(cat));
                         }
@@ -2992,6 +3669,7 @@ namespace MenuFrameworkUI
                         data.qcCategoryOrder = DefaultQuickLootCategoryOrder();
                         changed = true;
                     }
+                    HelpTooltip("Restore the default QuickLoot category order (Keys -> Medicines -> Chems -> ... -> Junk).");
                 }
             }
 
@@ -3007,34 +3685,45 @@ namespace MenuFrameworkUI
             auto& cfg = Config::GetSingleton();
             ConfigData data = cfg.GetSnapshot();
 
-            ImGuiMCP::Text("Live 3D world-unit anchor offsets. Negative Z lowers prompts closer to items.");
+            ImGuiMCP::Text("Live 3D world-unit anchor offsets (+Z raises higher in world; -Z lowers). Hover any slider for examples.");
             ImGuiMCP::Separator();
 
             bool changed = false;
             ImGuiMCP::Text("Loose Items (Beaker, Oil Canister, etc.)");
             changed |= ImGuiMCP::SliderFloat("Items: Vertical Height (Z)", &data.itemOffset.z, -100.0f, 100.0f, "%.1f");
+            HelpTooltip("Vertical world-space Z offset for loose items. Positive (+Z) floats the prompt higher above items; negative (e.g. -8) pulls it tighter onto small objects on tables.");
             changed |= ImGuiMCP::SliderFloat("Items: Horizontal (X)", &data.itemOffset.x, -100.0f, 100.0f, "%.1f");
+            HelpTooltip("World-space East (+X) / West (-X) anchor offset for loose items. Usually keep at 0 and use Screen Offset X for 2D screen shifts.");
             changed |= ImGuiMCP::SliderFloat("Items: Depth (Y)", &data.itemOffset.y, -100.0f, 100.0f, "%.1f");
+            HelpTooltip("World-space North (+Y) / South (-Y) anchor offset for loose items. Usually keep at 0.");
 
             ImGuiMCP::Separator();
             ImGuiMCP::Text("Doors");
             changed |= ImGuiMCP::SliderFloat("Doors: Vertical Height (Z)", &data.doorOffset.z, -100.0f, 100.0f, "%.1f");
+            HelpTooltip("Vertical world-space Z offset for doors. Increase (+Z) toward 0 to raise toward the handle/center; decrease (-Z, e.g. -20) to place it just below the door lock.");
             changed |= DrawVec3Sliders("Doors (X / Y / Z)", data.doorOffset, -100.0f, 100.0f);
+            HelpTooltip("Fine-tune Doors world anchor across X (East/West), Y (North/South), and Z (Height: + raises, - lowers).");
 
             ImGuiMCP::Separator();
             ImGuiMCP::Text("NPCs & Companions");
             changed |= ImGuiMCP::SliderFloat("NPCs: Vertical Height (Z)", &data.npcOffset.z, -100.0f, 100.0f, "%.1f");
+            HelpTooltip("Vertical world-space Z offset relative to the NPC's torso/chest bone. Increase (e.g. +20) to move near the shoulder/head; decrease (e.g. -10) to sit lower on the chest.");
             changed |= DrawVec3Sliders("NPCs (X / Y / Z)", data.npcOffset, -100.0f, 100.0f);
+            HelpTooltip("Fine-tune NPC world anchor across X (East/West), Y (North/South), and Z (Height: + raises toward head, - lowers toward waist).");
 
             ImGuiMCP::Separator();
-            ImGuiMCP::Text("Containers & Workbenches");
+            ImGuiMCP::Text("Containers & Corpses");
             changed |= ImGuiMCP::SliderFloat("Containers: Vertical Height (Z)", &data.containerOffset.z, -100.0f, 100.0f, "%.1f");
+            HelpTooltip("Vertical world-space Z offset for containers and corpses. Increase (e.g. +20) to float above chests/crates; decrease (e.g. 0) to sit directly over the lid/center.");
             changed |= DrawVec3Sliders("Containers (X / Y / Z)", data.containerOffset, -100.0f, 100.0f);
+            HelpTooltip("Fine-tune Containers world anchor across X (East/West), Y (North/South), and Z (Height: + raises above lid, - lowers).");
 
             ImGuiMCP::Separator();
             ImGuiMCP::Text("Terminals & Furniture (Workbenches, Chairs, Beds)");
             changed |= ImGuiMCP::SliderFloat("Terminals / Furniture: Vertical Height (Z)", &data.furnitureOffset.z, -100.0f, 100.0f, "%.1f");
+            HelpTooltip("Vertical world-space Z offset for terminals, workbenches, chairs, and beds. Increase (e.g. +15) to hover above the station; decrease to center over the surface.");
             changed |= DrawVec3Sliders("Terminals / Furniture (X / Y / Z)", data.furnitureOffset, -100.0f, 100.0f);
+            HelpTooltip("Fine-tune Terminals & Furniture world anchor across X (East/West), Y (North/South), and Z (Height: + raises, - lowers).");
 
             if (changed) {
                 cfg.ApplySnapshot(data, true);
@@ -3068,6 +3757,7 @@ namespace MenuFrameworkUI
 
         F4SEMenuFramework::SetSection("FAP - Floating Action Prompts");
         F4SEMenuFramework::AddSectionItem("General", RenderGeneral);
+        F4SEMenuFramework::AddSectionItem("Interaction", RenderInteraction);
         F4SEMenuFramework::AddSectionItem("Visual Style", RenderVisualStyle);
         F4SEMenuFramework::AddSectionItem("Info Card", RenderInfoCard);
         F4SEMenuFramework::AddSectionItem("QuickContainer", RenderQuickContainer);
@@ -3094,12 +3784,15 @@ namespace MenuFrameworkUI
             logger::warn("F4SE Menu Framework lacks ImDrawList_AddImage export; FallUI icon atlas and gamepad PNGs disabled");
         }
 
+        const bool hasLinePrimitives = GetProcAddress(fwMod, "ImDrawList_AddLine") != nullptr;
+        g_linePrimitivesSupported.store(hasLinePrimitives, std::memory_order_release);
+
         const bool hasCirclePrimitives =
             GetProcAddress(fwMod, "ImDrawList_AddCircle") != nullptr &&
             GetProcAddress(fwMod, "ImDrawList_AddCircleFilled") != nullptr &&
             GetProcAddress(fwMod, "ImDrawList_AddTriangle") != nullptr &&
             GetProcAddress(fwMod, "ImDrawList_AddRect") != nullptr &&
-            GetProcAddress(fwMod, "ImDrawList_AddLine") != nullptr;
+            hasLinePrimitives;
         g_circlePrimitivesSupported.store(hasCirclePrimitives, std::memory_order_release);
         if (!hasCirclePrimitives) {
             logger::warn("F4SE Menu Framework lacks circle/triangle draw exports; gamepad badges will use keycap fallback");
@@ -3111,10 +3804,26 @@ namespace MenuFrameworkUI
             logger::warn("F4SE Menu Framework lacks ImFont_FindGlyph export; gamepad glyph centering will use line bounds");
         }
 
+        const bool hasTooltips =
+            GetProcAddress(fwMod, "igIsItemHovered") != nullptr &&
+            GetProcAddress(fwMod, "igBeginTooltip") != nullptr &&
+            GetProcAddress(fwMod, "igEndTooltip") != nullptr &&
+            GetProcAddress(fwMod, "igTextUnformatted") != nullptr;
+        g_tooltipsSupported.store(hasTooltips, std::memory_order_release);
+        if (!hasTooltips) {
+            logger::warn("F4SE Menu Framework lacks ImGui tooltip exports; F1 hover tooltips disabled");
+        }
+
+        const bool hasTooltipWrap =
+            GetProcAddress(fwMod, "igPushTextWrapPos") != nullptr &&
+            GetProcAddress(fwMod, "igPopTextWrapPos") != nullptr &&
+            GetProcAddress(fwMod, "igGetFontSize") != nullptr;
+        g_tooltipWrapSupported.store(hasTooltipWrap, std::memory_order_release);
+
         if (GetProcAddress(fwMod, "RegisterHudElement") != nullptr) {
             g_hudElement = F4SEMenuFramework::AddHudElement(RenderHudOverlay);
             g_hudOverlayActive.store(g_hudElement != nullptr, std::memory_order_release);
-            logger::info("Registered FAP - Floating Action Prompts HUD overlay and 5 F1 settings tabs");
+            logger::info("Registered FAP - Floating Action Prompts HUD overlay and 6 F1 settings tabs");
         } else {
             g_hudOverlayActive.store(false, std::memory_order_release);
             logger::warn("F4SE Menu Framework lacks RegisterHudElement; Modern HUD overlay inactive");

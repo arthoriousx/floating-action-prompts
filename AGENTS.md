@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Developer and coding-agent guide for **FAP - Floating Action Prompts** (`FloatingActionPrompts`), an F4SE C++20 plugin targeting Fallout 4 NG/AE (`1.10.980+` / `1.11.x`) using CommonLibF4RD and F4SE Menu Framework.
+Developer and coding-agent guide for **FAP - Floating Action Prompts** (`FloatingActionPrompts`), an F4SE C++20 plugin targeting Fallout 4 OG/NG/AE (`1.10.163` / `1.10.980+` / `1.11.x`) using CommonLibF4RD and F4SE Menu Framework.
 
 ## Architecture & Module Map
 
@@ -22,7 +22,7 @@ src/
   OverlayLayout.h / .cpp # InfoCard geometry/clamping, hover dwell alpha curve, QuickLoot list window, FontAwesome map
   FallUIIcons.h / .cpp   # Zlib + SWF tag parser, FIS/Color XML parser, 32x32 CPU vector rasterizer for FallUI icons
   HUDController.h / .cpp # HUDMenu::AdvanceMovie hook, ButtonHintBar scanner, QuickContainer merge/expand, OverlaySnapshot
-  MenuFrameworkUI.h/.cpp # ImGui D3D11 HUD overlay renderer, dynamic framework probing, gamepad badges, 5-tab F1 editor
+  MenuFrameworkUI.h/.cpp # ImGui D3D11 HUD overlay renderer, dynamic framework probing, gamepad badges, 6-tab F1 editor
 tests/
   check.h
   test_scaffold.cpp

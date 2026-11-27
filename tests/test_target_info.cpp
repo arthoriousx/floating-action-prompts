@@ -245,6 +245,112 @@ int main()
         CHECK(TargetInfo::ResolveLoadDoorDestination("Metal Door", "Metal Door", "", "").empty());
     }
 
+    // 11. NEC + Power Armor condition resolution, formatting, adaptive colors, and Info Card row
+    {
+        // Power Armor piece defaults to 100% even without NEC or ExtraHealth, and reads ExtraHealth when damaged
+        const auto paIntact = TargetInfo::ResolveItemCondition({
+            TargetInfo::ItemKind::Armor, true, false, 0.0f, false
+        });
+        CHECK(paIntact.hasCondition);
+        CHECK_NEAR(paIntact.conditionPercent, 100.0f, 0.01f);
+
+        const auto paDamaged = TargetInfo::ResolveItemCondition({
+            TargetInfo::ItemKind::Armor, true, true, 0.42f, false
+        });
+        CHECK(paDamaged.hasCondition);
+        CHECK_NEAR(paDamaged.conditionPercent, 42.0f, 0.01f);
+
+        // Non-PA weapon without NEC and without ExtraHealth shows no condition
+        const auto weapVanilla = TargetInfo::ResolveItemCondition({
+            TargetInfo::ItemKind::Weapon, false, false, 0.0f, false
+        });
+        CHECK(!weapVanilla.hasCondition);
+
+        // Non-PA weapon with NEC installed defaults to 100% if untracked/fresh, or scales rawHealth
+        const auto weapNecFresh = TargetInfo::ResolveItemCondition({
+            TargetInfo::ItemKind::Weapon, false, false, 0.0f, true
+        });
+        CHECK(weapNecFresh.hasCondition);
+        CHECK_NEAR(weapNecFresh.conditionPercent, 100.0f, 0.01f);
+
+        const auto weapNecBroken = TargetInfo::ResolveItemCondition({
+            TargetInfo::ItemKind::Weapon, false, true, -0.1f, true
+        });
+        CHECK(weapNecBroken.hasCondition);
+        CHECK_NEAR(weapNecBroken.conditionPercent, 0.0f, 0.01f);
+
+        // Aid (Food) shows ExtraHealth ONLY when NEC is installed
+        const auto aidNoNec = TargetInfo::ResolveItemCondition({
+            TargetInfo::ItemKind::Aid, false, true, 0.65f, false
+        });
+        CHECK(!aidNoNec.hasCondition);
+
+        const auto aidNec = TargetInfo::ResolveItemCondition({
+            TargetInfo::ItemKind::Aid, false, true, 0.65f, true
+        });
+        CHECK(aidNec.hasCondition);
+        CHECK_NEAR(aidNec.conditionPercent, 65.0f, 0.01f);
+
+        // Ammo / Misc never get condition
+        CHECK(!TargetInfo::ResolveItemCondition({ TargetInfo::ItemKind::Ammo, false, true, 0.5f, true }).hasCondition);
+
+        // Adaptive colors and formatting
+        CHECK(TargetInfo::GetConditionColorRgb(80.0f, 0xDCE6F0u) == 0xDCE6F0u);
+        CHECK(TargetInfo::GetConditionColorRgb(49.5f, 0xDCE6F0u) == 0xF6C86Eu);
+        CHECK(TargetInfo::GetConditionColorRgb(19.9f, 0xDCE6F0u) == 0xFF4D4Du);
+        CHECK(TargetInfo::FormatConditionPercent(0.0f) == "0%");
+        CHECK(TargetInfo::FormatConditionPercent(0.3f) == "1%");
+        CHECK(TargetInfo::FormatConditionPercent(84.6f) == "85%");
+        CHECK(TargetInfo::FormatConditionPercent(120.0f) == "100%");
+
+        // BuildInfoCardRows gates Condition independently via infoCardConditionDisplay (0..3)
+        ConfigData cfg;
+        TargetInfo::TargetMetadata gun;
+        gun.isWeapon = true;
+        gun.damage = 40;
+        gun.hasCondition = true;
+        gun.conditionPercent = 35.0f;
+
+        cfg.itemConditionDisplay = 0;
+        cfg.infoCardConditionDisplay = 1; // Bar only -> empty text value, isCondition = true
+        const auto rowsBar = TargetInfo::BuildInfoCardRows(gun, cfg);
+        bool foundBar = false;
+        for (const auto& r : rowsBar) {
+            if (r.isCondition && r.label == "Condition" && r.value.empty()) {
+                foundBar = true;
+            }
+        }
+        CHECK(foundBar);
+
+        cfg.infoCardConditionDisplay = 2; // Percent
+        const auto rowsPct = TargetInfo::BuildInfoCardRows(gun, cfg);
+        bool foundPct = false;
+        for (const auto& r : rowsPct) {
+            if (r.isCondition && r.label == "Condition" && r.value == "35%") {
+                foundPct = true;
+            }
+        }
+        CHECK(foundPct);
+
+        cfg.infoCardConditionDisplay = 3; // Bar + Percent
+        const auto rowsBoth = TargetInfo::BuildInfoCardRows(gun, cfg);
+        bool foundBoth = false;
+        for (const auto& r : rowsBoth) {
+            if (r.isCondition && r.label == "Condition" && r.value == "35%") {
+                foundBoth = true;
+            }
+        }
+        CHECK(foundBoth);
+
+        cfg.itemConditionDisplay = 3;
+        cfg.infoCardConditionDisplay = 0; // Off in InfoCard even when QuickLoot is Bar+Percent
+        const auto rowsOff = TargetInfo::BuildInfoCardRows(gun, cfg);
+        for (const auto& r : rowsOff) {
+            CHECK(r.label != "Condition");
+            CHECK(!r.isCondition);
+        }
+    }
+
     std::cout << "[TEST] test_target_info PASSED" << std::endl;
     return 0;
 }

@@ -21,12 +21,18 @@ namespace FallUIIcons
         std::string symbolName;
         std::uint32_t rgbColor{ 0xFFFFFFu };
         bool hasColor{ false };
+        std::string subSymbolName;
+        std::uint32_t subRgbColor{ 0xFFFFFFu };
+        bool hasSubColor{ false };
 
         bool hasFallback{ false };
         std::string fallbackSwfRelPath;
         std::string fallbackSymbolName;
         std::uint32_t fallbackRgbColor{ 0xFFFFFFu };
         bool fallbackHasColor{ false };
+        std::string fallbackSubSymbolName;
+        std::uint32_t fallbackSubRgbColor{ 0xFFFFFFu };
+        bool fallbackHasSubColor{ false };
     };
 
     struct SwfEdge
@@ -73,6 +79,15 @@ namespace FallUIIcons
         std::size_t a_maxOutBytes = 16u * 1024u * 1024u);
 
     [[nodiscard]] std::string ExtractLeadingSorterTag(std::string_view a_rawName);
+
+    [[nodiscard]] std::uint32_t AdjustColorBrightnessSaturation(
+        std::uint32_t a_rgb,
+        int a_brightnessPct,
+        int a_saturationPct) noexcept;
+
+    void ApplyIconRadialShading(
+        std::vector<std::uint8_t>& a_rgba,
+        int a_tileSize) noexcept;
 
     class SwfIconFile
     {
@@ -122,6 +137,9 @@ namespace FallUIIcons
         [[nodiscard]] std::size_t TagCount() const noexcept;
         [[nodiscard]] std::size_t ColorCount() const noexcept;
         [[nodiscard]] std::size_t LoadedSwfCount() const noexcept;
+        [[nodiscard]] std::vector<std::string> LoadedAddonNames() const;
+        [[nodiscard]] std::string ActiveColorSetName() const;
+        [[nodiscard]] bool IconsEffectEnabled() const noexcept;
 
         [[nodiscard]] bool ResolveIcon(
             std::string_view a_rawName,
@@ -132,7 +150,9 @@ namespace FallUIIcons
             const ResolvedFallUIIcon& a_resolved,
             int a_tileSize,
             std::vector<std::uint8_t>& a_outRgba,
-            bool* a_outUsedFallback = nullptr);
+            bool* a_outUsedFallback = nullptr,
+            bool a_bakeSubColors = true,
+            bool* a_outColorsBaked = nullptr);
 
     private:
         struct SwfCandidate
@@ -141,6 +161,9 @@ namespace FallUIIcons
             std::string iconSymbol;
             std::uint32_t rgbColor{ 0xFFFFFFu };
             bool hasColor{ false };
+            std::string subIconSymbol;
+            std::uint32_t subRgbColor{ 0xFFFFFFu };
+            bool hasSubColor{ false };
         };
 
         struct TagDefinition
@@ -180,7 +203,7 @@ namespace FallUIIcons
             const std::string& a_cleanedXml,
             std::unordered_map<std::string, ColorDefinition>& a_ioColors) const;
 
-        void ParseTagXml(
+        std::size_t ParseTagXml(
             const std::string& a_rawXml,
             const std::string& a_defaultSwfRelPath,
             bool a_verifySwfOnDisk,
@@ -198,6 +221,9 @@ namespace FallUIIcons
         std::unordered_map<std::string, std::vector<AutoTagRule>> _autoRules;
         std::unordered_map<std::string, std::string> _autoWildcards;
         std::unordered_map<std::string, SwfCacheEntry> _swfCache;
+        std::vector<std::string> _loadedAddons;
+        std::string _activeColorSet{ "Default.xml" };
+        bool _iconsEffectEnabled{ true };
         std::size_t _colorCount{ 0 };
     };
 }

@@ -64,6 +64,37 @@ struct ConfigData
     bool blockHiddenCompanionInteractions{ true };
     float grabHoldDelay{ 1.50f };
 
+    // Featured item popup protection, aiming & NPC distance ([General])
+    int featuredItemGraceMs{ 600 };     // 0..2000 ms
+    int aimingPromptMode{ 1 };          // 0 = Off (Show All), 1 = Hide NPC Prompts While Aiming, 2 = Hide All Prompts While Aiming
+    bool limitNpcPromptDistance{ true };
+    float npcMaxDistance{ 185.0f };
+    bool npcKeepRangedActions{ true };
+    float npcRangedMaxDistance{ 450.0f }; // 0 = Unlimited
+    bool blockPromptsThroughWalls{ true };
+
+    // Third-person character-facing proximity assist ([ThirdPersonAssist])
+    bool tpAssistEnabled{ true };
+    int tpAssistMode{ 0 };              // 0 = Fallback Only, 1 = Smart Hybrid
+    float tpAssistMaxDistance{ 130.0f };
+    float tpAssistConeDegrees{ 55.0f };
+    int tpAssistLockMs{ 300 };          // 0..1000 ms anti-flicker lock duration
+    bool tpAssistItems{ true };
+    bool tpAssistDoors{ true };
+    bool tpAssistFurniture{ true };
+    bool tpAssistContainers{ false };
+
+    // Hold-to-Activate ([HoldToActivate])
+    bool holdToActivateEnabled{ true };
+    float holdToActivateDuration{ 0.50f };
+    int holdRingStyle{ 0 };             // 0 = Monochrome (White), 1 = Accent Color
+    bool holdDrink{ true };
+    bool holdSitSleep{ true };
+    bool holdStealPickpocket{ true };
+    bool holdEatCannibal{ false };
+    bool holdCraftPowerArmor{ false };
+    std::string holdCustomVerbs{};
+
     // Context-aware 3D Offsets (world units)
     Vector3 doorOffset{ 0.0f, 0.0f, -20.0f };
     Vector3 npcOffset{ 0.0f, 0.0f, 10.0f };
@@ -72,7 +103,7 @@ struct ConfigData
     Vector3 furnitureOffset{ 0.0f, 0.0f, 10.0f };
 
     // Visual style ([Visual])
-    int promptStyle{ 1 };            // 0 = Vanilla, 1 = Modern (GTA 6)
+    int promptStyle{ 1 };            // 0 = Vanilla, 1 = Modern (Borderless)
     int buttonIconStyle{ 0 };        // 0 = Keyboard (E/R), 1 = PS Colored, 2 = Xbox Colored, 3 = PS Monochrome, 4 = Xbox Monochrome
     int iconLibrary{ 1 };            // 0 = FontAwesome, 1 = FallUI Icon Library
     bool modernShowItemIcon{ true };
@@ -82,6 +113,7 @@ struct ConfigData
     bool inlineItemInfo{ false };
     int modernTextMode{ 0 };         // 0 = Action Only, 1 = Action + Name, 2 = Name on World Objects Only
     bool showDoorDestination{ true };
+    bool showInteractableHeader{ true };
     bool cleanSorterTags{ true };
     float modernBgOpacity{ 0.0f };
     bool modernBorder{ false };
@@ -147,6 +179,7 @@ struct ConfigData
     bool showWeaponArmorStats{ true };
     bool showNpcStats{ true };
     bool infoCardInQuickContainer{ true };
+    int infoCardConditionDisplay{ 3 }; // 0 = Off, 1 = Bar, 2 = Percent, 3 = Bar + Percent
 
     // Floating QuickContainer ([QuickContainer])
     bool floatQuickContainer{ true };
@@ -173,6 +206,7 @@ struct ConfigData
     bool qcPinTaggedForSearch{ true };
     bool qcPinCaps{ true };
     int qcTakeDebounceMs{ 0 };        // 0..300 ms post-release anti-chatter debounce
+    int itemConditionDisplay{ 1 };    // 0 = Off, 1 = Bar, 2 = Percent, 3 = Bar + Percent
     std::array<int, kQuickLootCategoryCount> qcCategoryOrder{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18 };
 };
 

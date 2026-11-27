@@ -216,6 +216,47 @@ int main()
         CHECK(aidCol != ammoCol);
     }
 
+    // 15. Hold progress ring geometry helpers (rounded rect & circle)
+    {
+        std::vector<OverlayLayout::HoldRingSegment> segs;
+
+        // 0% -> empty, 100% -> full perimeter
+        OverlayLayout::BuildRoundedRectProgressSegments(10.0f, 10.0f, 30.0f, 30.0f, 4.0f, 0.0f, segs);
+        CHECK(segs.empty());
+
+        OverlayLayout::BuildRoundedRectProgressSegments(10.0f, 10.0f, 30.0f, 30.0f, 0.0f, 0.25f, segs);
+        CHECK(!segs.empty());
+        // Starts at top-center (20, 10)
+        CHECK_NEAR(segs.front().x1, 20.0f, 0.05f);
+        CHECK_NEAR(segs.front().y1, 10.0f, 0.05f);
+        // 25% of square 20x20 (perimeter 80 -> len 20): 10 right to (30,10) + 10 down to (30,20)
+        CHECK_NEAR(segs.back().x2, 30.0f, 0.05f);
+        CHECK_NEAR(segs.back().y2, 20.0f, 0.05f);
+
+        OverlayLayout::BuildRoundedRectProgressSegments(10.0f, 10.0f, 30.0f, 30.0f, 4.0f, 1.0f, segs);
+        CHECK(!segs.empty());
+        CHECK_NEAR(segs.front().x1, 20.0f, 0.05f);
+        CHECK_NEAR(segs.back().x2, 20.0f, 0.05f);
+        CHECK_NEAR(segs.back().y2, 10.0f, 0.05f);
+
+        // Circle progress
+        OverlayLayout::BuildCircleProgressSegments(50.0f, 50.0f, 10.0f, 0.0f, 24, segs);
+        CHECK(segs.empty());
+
+        OverlayLayout::BuildCircleProgressSegments(50.0f, 50.0f, 10.0f, 0.5f, 24, segs);
+        CHECK(!segs.empty());
+        // Starts at 12 o'clock (50, 40) and ends at 6 o'clock (50, 60)
+        CHECK_NEAR(segs.front().x1, 50.0f, 0.05f);
+        CHECK_NEAR(segs.front().y1, 40.0f, 0.05f);
+        CHECK_NEAR(segs.back().x2, 50.0f, 0.05f);
+        CHECK_NEAR(segs.back().y2, 60.0f, 0.05f);
+
+        OverlayLayout::BuildCircleProgressSegments(50.0f, 50.0f, 10.0f, 1.0f, 24, segs);
+        CHECK(segs.size() == 24);
+        CHECK_NEAR(segs.back().x2, 50.0f, 0.05f);
+        CHECK_NEAR(segs.back().y2, 40.0f, 0.05f);
+    }
+
     std::cout << "[TEST] test_overlay_layout PASSED" << std::endl;
     return 0;
 }

@@ -163,6 +163,19 @@ namespace
         ClampFinite(a_data.companionMaxDistance, 50.0f, 500.0f, defaults.companionMaxDistance);
         ClampFinite(a_data.companionCombatMaxDistance, 0.0f, 500.0f, defaults.companionCombatMaxDistance);
         ClampFinite(a_data.grabHoldDelay, 0.30f, 2.00f, defaults.grabHoldDelay);
+        a_data.featuredItemGraceMs = std::clamp(a_data.featuredItemGraceMs, 0, 2000);
+        a_data.aimingPromptMode = std::clamp(a_data.aimingPromptMode, 0, 2);
+        ClampFinite(a_data.npcMaxDistance, 60.0f, 500.0f, defaults.npcMaxDistance);
+        ClampFinite(a_data.npcRangedMaxDistance, 0.0f, 2000.0f, defaults.npcRangedMaxDistance);
+
+        a_data.tpAssistMode = std::clamp(a_data.tpAssistMode, 0, 1);
+        ClampFinite(a_data.tpAssistMaxDistance, 60.0f, 250.0f, defaults.tpAssistMaxDistance);
+        ClampFinite(a_data.tpAssistConeDegrees, 20.0f, 90.0f, defaults.tpAssistConeDegrees);
+        a_data.tpAssistLockMs = std::clamp(a_data.tpAssistLockMs, 0, 1000);
+
+        ClampFinite(a_data.holdToActivateDuration, 0.20f, 2.00f, defaults.holdToActivateDuration);
+        a_data.holdRingStyle = std::clamp(a_data.holdRingStyle, 0, 1);
+        a_data.holdCustomVerbs = SanitizeFontSetting(a_data.holdCustomVerbs);
 
         ClampOffset(a_data.doorOffset, defaults.doorOffset);
         ClampOffset(a_data.npcOffset, defaults.npcOffset);
@@ -218,6 +231,7 @@ namespace
         a_data.infoCardLabelColor &= 0x00FFFFFFu;
         a_data.infoCardValueColor &= 0x00FFFFFFu;
         a_data.infoCardFont = SanitizeFontSetting(a_data.infoCardFont);
+        a_data.infoCardConditionDisplay = std::clamp(a_data.infoCardConditionDisplay, 0, 3);
 
         ClampFinite(a_data.quickContainerSmoothing, 0.05f, 1.0f, defaults.quickContainerSmoothing);
         ClampFinite(a_data.quickContainerDeadzone, 0.0f, 30.0f, defaults.quickContainerDeadzone);
@@ -234,6 +248,7 @@ namespace
         a_data.qcSortMode = std::clamp(a_data.qcSortMode, 0, 6);
         a_data.qcCategorySecondarySort = std::clamp(a_data.qcCategorySecondarySort, 0, 3);
         a_data.qcTakeDebounceMs = std::clamp(a_data.qcTakeDebounceMs, 0, 300);
+        a_data.itemConditionDisplay = std::clamp(a_data.itemConditionDisplay, 0, 3);
         SanitizeQuickLootCategoryOrder(a_data.qcCategoryOrder);
     }
 
@@ -283,6 +298,33 @@ namespace
                     else if (key == "bCompanionDeprioritizeLoot") a_target.companionDeprioritizeLoot = ParseBool(valStr);
                     else if (key == "bBlockHiddenCompanionInteractions") a_target.blockHiddenCompanionInteractions = ParseBool(valStr);
                     else if (key == "fGrabHoldDelay") a_target.grabHoldDelay = std::stof(valStr);
+                    else if (key == "iFeaturedItemGraceMs") a_target.featuredItemGraceMs = std::stoi(valStr);
+                    else if (key == "iAimingPromptMode") a_target.aimingPromptMode = std::stoi(valStr);
+                    else if (key == "bLimitNpcPromptDistance") a_target.limitNpcPromptDistance = ParseBool(valStr);
+                    else if (key == "fNpcMaxDistance") a_target.npcMaxDistance = std::stof(valStr);
+                    else if (key == "bNpcKeepRangedActions") a_target.npcKeepRangedActions = ParseBool(valStr);
+                    else if (key == "fNpcRangedMaxDistance") a_target.npcRangedMaxDistance = std::stof(valStr);
+                    else if (key == "bBlockPromptsThroughWalls") a_target.blockPromptsThroughWalls = ParseBool(valStr);
+                } else if (currentSection == "ThirdPersonAssist") {
+                    if (key == "bTpAssistEnabled") a_target.tpAssistEnabled = ParseBool(valStr);
+                    else if (key == "iTpAssistMode") a_target.tpAssistMode = std::stoi(valStr);
+                    else if (key == "fTpAssistMaxDistance") a_target.tpAssistMaxDistance = std::stof(valStr);
+                    else if (key == "fTpAssistConeDegrees") a_target.tpAssistConeDegrees = std::stof(valStr);
+                    else if (key == "iTpAssistLockMs") a_target.tpAssistLockMs = std::stoi(valStr);
+                    else if (key == "bTpAssistItems") a_target.tpAssistItems = ParseBool(valStr);
+                    else if (key == "bTpAssistDoors") a_target.tpAssistDoors = ParseBool(valStr);
+                    else if (key == "bTpAssistFurniture") a_target.tpAssistFurniture = ParseBool(valStr);
+                    else if (key == "bTpAssistContainers") a_target.tpAssistContainers = ParseBool(valStr);
+                } else if (currentSection == "HoldToActivate") {
+                    if (key == "bHoldToActivateEnabled") a_target.holdToActivateEnabled = ParseBool(valStr);
+                    else if (key == "fHoldToActivateDuration") a_target.holdToActivateDuration = std::stof(valStr);
+                    else if (key == "iHoldRingStyle") a_target.holdRingStyle = std::stoi(valStr);
+                    else if (key == "bHoldDrink") a_target.holdDrink = ParseBool(valStr);
+                    else if (key == "bHoldSitSleep") a_target.holdSitSleep = ParseBool(valStr);
+                    else if (key == "bHoldStealPickpocket") a_target.holdStealPickpocket = ParseBool(valStr);
+                    else if (key == "bHoldEatCannibal") a_target.holdEatCannibal = ParseBool(valStr);
+                    else if (key == "bHoldCraftPowerArmor") a_target.holdCraftPowerArmor = ParseBool(valStr);
+                    else if (key == "sHoldCustomVerbs") a_target.holdCustomVerbs = SanitizeFontSetting(valStr);
                 } else if (currentSection == "Offsets") {
                     if (key == "fDoorOffsetX") a_target.doorOffset.x = std::stof(valStr);
                     else if (key == "fDoorOffsetY") a_target.doorOffset.y = std::stof(valStr);
@@ -310,6 +352,7 @@ namespace
                     else if (key == "bInlineItemInfo") a_target.inlineItemInfo = ParseBool(valStr);
                     else if (key == "iModernTextMode") a_target.modernTextMode = std::stoi(valStr);
                     else if (key == "bShowDoorDestination") a_target.showDoorDestination = ParseBool(valStr);
+                    else if (key == "bShowInteractableHeader") a_target.showInteractableHeader = ParseBool(valStr);
                     else if (key == "bCleanSorterTags") a_target.cleanSorterTags = ParseBool(valStr);
                     else if (key == "fModernBgOpacity") a_target.modernBgOpacity = std::stof(valStr);
                     else if (key == "bModernBorder") a_target.modernBorder = ParseBool(valStr);
@@ -373,6 +416,7 @@ namespace
                     else if (key == "bShowWeaponArmorStats") a_target.showWeaponArmorStats = ParseBool(valStr);
                     else if (key == "bShowNpcStats") a_target.showNpcStats = ParseBool(valStr);
                     else if (key == "bInfoCardInQuickContainer") a_target.infoCardInQuickContainer = ParseBool(valStr);
+                    else if (key == "iInfoCardConditionDisplay") a_target.infoCardConditionDisplay = std::stoi(valStr);
                     else if (key == "sInfoCardFont") a_target.infoCardFont = SanitizeFontSetting(valStr);
                 } else if (currentSection == "QuickContainer") {
                     if (key == "bFloatQuickContainer") a_target.floatQuickContainer = ParseBool(valStr);
@@ -401,6 +445,7 @@ namespace
                     else if (key == "bQcPinTaggedForSearch") a_target.qcPinTaggedForSearch = ParseBool(valStr);
                     else if (key == "bQcPinCaps") a_target.qcPinCaps = ParseBool(valStr);
                     else if (key == "iQcTakeDebounceMs") a_target.qcTakeDebounceMs = std::stoi(valStr);
+                    else if (key == "iItemConditionDisplay") a_target.itemConditionDisplay = std::stoi(valStr);
                     else if (key == "sQcCategoryOrder") a_target.qcCategoryOrder = ParseQuickLootCategoryOrder(valStr);
                 }
             } catch (...) {
@@ -435,7 +480,36 @@ namespace
         file << "fCompanionCombatMaxDistance=" << a_data.companionCombatMaxDistance << "\n";
         file << "bCompanionDeprioritizeLoot=" << (a_data.companionDeprioritizeLoot ? 1 : 0) << "\n";
         file << "bBlockHiddenCompanionInteractions=" << (a_data.blockHiddenCompanionInteractions ? 1 : 0) << "\n";
-        file << "fGrabHoldDelay=" << a_data.grabHoldDelay << "\n\n";
+        file << "fGrabHoldDelay=" << a_data.grabHoldDelay << "\n";
+        file << "iFeaturedItemGraceMs=" << a_data.featuredItemGraceMs << "\n";
+        file << "iAimingPromptMode=" << a_data.aimingPromptMode << "\n";
+        file << "bLimitNpcPromptDistance=" << (a_data.limitNpcPromptDistance ? 1 : 0) << "\n";
+        file << "fNpcMaxDistance=" << a_data.npcMaxDistance << "\n";
+        file << "bNpcKeepRangedActions=" << (a_data.npcKeepRangedActions ? 1 : 0) << "\n";
+        file << "fNpcRangedMaxDistance=" << a_data.npcRangedMaxDistance << "\n";
+        file << "bBlockPromptsThroughWalls=" << (a_data.blockPromptsThroughWalls ? 1 : 0) << "\n\n";
+
+        file << "[ThirdPersonAssist]\n";
+        file << "bTpAssistEnabled=" << (a_data.tpAssistEnabled ? 1 : 0) << "\n";
+        file << "iTpAssistMode=" << a_data.tpAssistMode << "\n";
+        file << "fTpAssistMaxDistance=" << a_data.tpAssistMaxDistance << "\n";
+        file << "fTpAssistConeDegrees=" << a_data.tpAssistConeDegrees << "\n";
+        file << "iTpAssistLockMs=" << a_data.tpAssistLockMs << "\n";
+        file << "bTpAssistItems=" << (a_data.tpAssistItems ? 1 : 0) << "\n";
+        file << "bTpAssistDoors=" << (a_data.tpAssistDoors ? 1 : 0) << "\n";
+        file << "bTpAssistFurniture=" << (a_data.tpAssistFurniture ? 1 : 0) << "\n";
+        file << "bTpAssistContainers=" << (a_data.tpAssistContainers ? 1 : 0) << "\n\n";
+
+        file << "[HoldToActivate]\n";
+        file << "bHoldToActivateEnabled=" << (a_data.holdToActivateEnabled ? 1 : 0) << "\n";
+        file << "fHoldToActivateDuration=" << a_data.holdToActivateDuration << "\n";
+        file << "iHoldRingStyle=" << a_data.holdRingStyle << "\n";
+        file << "bHoldDrink=" << (a_data.holdDrink ? 1 : 0) << "\n";
+        file << "bHoldSitSleep=" << (a_data.holdSitSleep ? 1 : 0) << "\n";
+        file << "bHoldStealPickpocket=" << (a_data.holdStealPickpocket ? 1 : 0) << "\n";
+        file << "bHoldEatCannibal=" << (a_data.holdEatCannibal ? 1 : 0) << "\n";
+        file << "bHoldCraftPowerArmor=" << (a_data.holdCraftPowerArmor ? 1 : 0) << "\n";
+        file << "sHoldCustomVerbs=" << a_data.holdCustomVerbs << "\n\n";
 
         file << "[Offsets]\n";
         file << "fDoorOffsetX=" << a_data.doorOffset.x << "\n";
@@ -465,6 +539,7 @@ namespace
         file << "bInlineItemInfo=" << (a_data.inlineItemInfo ? 1 : 0) << "\n";
         file << "iModernTextMode=" << a_data.modernTextMode << "\n";
         file << "bShowDoorDestination=" << (a_data.showDoorDestination ? 1 : 0) << "\n";
+        file << "bShowInteractableHeader=" << (a_data.showInteractableHeader ? 1 : 0) << "\n";
         file << "bCleanSorterTags=" << (a_data.cleanSorterTags ? 1 : 0) << "\n";
         file << "fModernBgOpacity=" << a_data.modernBgOpacity << "\n";
         file << "bModernBorder=" << (a_data.modernBorder ? 1 : 0) << "\n";
@@ -529,6 +604,7 @@ namespace
         file << "bShowWeaponArmorStats=" << (a_data.showWeaponArmorStats ? 1 : 0) << "\n";
         file << "bShowNpcStats=" << (a_data.showNpcStats ? 1 : 0) << "\n";
         file << "bInfoCardInQuickContainer=" << (a_data.infoCardInQuickContainer ? 1 : 0) << "\n";
+        file << "iInfoCardConditionDisplay=" << a_data.infoCardConditionDisplay << "\n";
         file << "sInfoCardFont=" << a_data.infoCardFont << "\n\n";
 
         file << "[QuickContainer]\n";
@@ -558,6 +634,7 @@ namespace
         file << "bQcPinTaggedForSearch=" << (a_data.qcPinTaggedForSearch ? 1 : 0) << "\n";
         file << "bQcPinCaps=" << (a_data.qcPinCaps ? 1 : 0) << "\n";
         file << "iQcTakeDebounceMs=" << a_data.qcTakeDebounceMs << "\n";
+        file << "iItemConditionDisplay=" << a_data.itemConditionDisplay << "\n";
         file << "sQcCategoryOrder=" << FormatQuickLootCategoryOrder(a_data.qcCategoryOrder) << "\n";
 
         return file.good();

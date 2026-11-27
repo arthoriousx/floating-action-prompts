@@ -248,6 +248,143 @@ namespace OverlayLayout
         }
     }
 
+    void BuildRoundedRectProgressSegments(
+        float a_minX,
+        float a_minY,
+        float a_maxX,
+        float a_maxY,
+        float a_radius,
+        float a_progress,
+        std::vector<HoldRingSegment>& a_out) noexcept
+    {
+        a_out.clear();
+        if (!std::isfinite(a_minX) || !std::isfinite(a_minY) ||
+            !std::isfinite(a_maxX) || !std::isfinite(a_maxY) ||
+            !std::isfinite(a_progress)) {
+            return;
+        }
+        const float progress = std::clamp(a_progress, 0.0f, 1.0f);
+        if (progress <= 0.0f) {
+            return;
+        }
+        const float w = a_maxX - a_minX;
+        const float h = a_maxY - a_minY;
+        if (w <= 0.01f || h <= 0.01f) {
+            return;
+        }
+
+        const float r = std::clamp(std::isfinite(a_radius) ? a_radius : 0.0f, 0.0f, 0.5f * std::min(w, h));
+        const float midX = 0.5f * (a_minX + a_maxX);
+        constexpr float kHalfPi = 1.57079632679f;
+
+        std::vector<Point2D> poly;
+        poly.reserve(40);
+        auto pushPt = [&](float x, float y) {
+            if (poly.empty() ||
+                std::fabs(poly.back().x - x) > 0.01f ||
+                std::fabs(poly.back().y - y) > 0.01f) {
+                poly.push_back({ x, y });
+            }
+        };
+        auto pushArc = [&](float cx, float cy, float startAng, float endAng) {
+            if (r <= 0.05f) {
+                return;
+            }
+            constexpr int kArcSteps = 5;
+            for (int i = 0; i <= kArcSteps; ++i) {
+                const float t = static_cast<float>(i) / static_cast<float>(kArcSteps);
+                const float ang = startAng + (endAng - startAng) * t;
+                pushPt(cx + std::cos(ang) * r, cy + std::sin(ang) * r);
+            }
+        };
+
+        // Start at top-center and trace clockwise around rounded rectangle
+        pushPt(midX, a_minY);
+        pushPt(a_maxX - r, a_minY);
+        pushArc(a_maxX - r, a_minY + r, -kHalfPi, 0.0f);
+        pushPt(a_maxX, a_maxY - r);
+        pushArc(a_maxX - r, a_maxY - r, 0.0f, kHalfPi);
+        pushPt(a_minX + r, a_maxY);
+        pushArc(a_minX + r, a_maxY - r, kHalfPi, 2.0f * kHalfPi);
+        pushPt(a_minX, a_minY + r);
+        pushArc(a_minX + r, a_minY + r, 2.0f * kHalfPi, 3.0f * kHalfPi);
+        pushPt(midX, a_minY);
+
+        if (poly.size() < 2) {
+            return;
+        }
+
+        float totalLen = 0.0f;
+        for (std::size_t i = 0; i + 1 < poly.size(); ++i) {
+            totalLen += std::hypot(poly[i + 1].x - poly[i].x, poly[i + 1].y - poly[i].y);
+        }
+        if (totalLen <= 0.01f) {
+            return;
+        }
+
+        float targetLen = totalLen * progress;
+        for (std::size_t i = 0; i + 1 < poly.size() && targetLen > 0.001f; ++i) {
+            const float dx = poly[i + 1].x - poly[i].x;
+            const float dy = poly[i + 1].y - poly[i].y;
+            const float segLen = std::hypot(dx, dy);
+            if (segLen <= 0.001f) {
+                continue;
+            }
+            if (targetLen >= segLen) {
+                a_out.push_back({ poly[i].x, poly[i].y, poly[i + 1].x, poly[i + 1].y });
+                targetLen -= segLen;
+            } else {
+                const float frac = targetLen / segLen;
+                a_out.push_back({
+                    poly[i].x,
+                    poly[i].y,
+                    poly[i].x + dx * frac,
+                    poly[i].y + dy * frac
+                });
+                targetLen = 0.0f;
+                break;
+            }
+        }
+    }
+
+    void BuildCircleProgressSegments(
+        float a_cx,
+        float a_cy,
+        float a_radius,
+        float a_progress,
+        int a_totalSegments,
+        std::vector<HoldRingSegment>& a_out) noexcept
+    {
+        a_out.clear();
+        if (!std::isfinite(a_cx) || !std::isfinite(a_cy) ||
+            !std::isfinite(a_radius) || !std::isfinite(a_progress) ||
+            a_radius <= 0.01f) {
+            return;
+        }
+        const float progress = std::clamp(a_progress, 0.0f, 1.0f);
+        if (progress <= 0.0f) {
+            return;
+        }
+
+        const int segs = std::clamp(a_totalSegments, 8, 64);
+        const float startAng = -1.57079632679f;
+        const float sweep = 6.28318530718f * progress;
+        const int activeSegs = std::max(1, static_cast<int>(std::ceil(static_cast<float>(segs) * progress)));
+
+        for (int i = 0; i < activeSegs; ++i) {
+            const float t0 = static_cast<float>(i) / static_cast<float>(activeSegs);
+            const float t1 = static_cast<float>(i + 1) / static_cast<float>(activeSegs);
+            const float ang0 = startAng + sweep * t0;
+            const float ang1 = startAng + sweep * t1;
+            a_out.push_back({
+                a_cx + std::cos(ang0) * a_radius,
+                a_cy + std::sin(ang0) * a_radius,
+                a_cx + std::cos(ang1) * a_radius,
+                a_cy + std::sin(ang1) * a_radius
+            });
+        }
+    }
+
     std::string TruncateUtf8Prefix(std::string_view a_text, std::size_t a_maxBytes)
     {
         if (a_maxBytes >= a_text.size()) {

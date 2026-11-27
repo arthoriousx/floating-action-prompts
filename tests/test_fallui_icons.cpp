@@ -297,6 +297,7 @@ int main()
             ofs << "  <tag keyword=\"CustomWild\" icon=\"Test.Square\" colorname=\"pink,gold\" />\n";
             ofs << "  <tag keyword=\"CycleTest\" icon=\"Test.Square\" colorname=\"CycleA\" />\n";
             ofs << "  <tag keyword='AttrQuote' note='A > B' icon='Test.SpriteSquare' colorname='WeaponRanged' />\n";
+            ofs << "  <tag keyword='SubTest' icon='Test.Square' subicon='Test.SpriteSquare' colorname='WeaponRanged,white' />\n";
             ofs << "</tags></TagConfiguration>\n";
         }
 
@@ -322,17 +323,26 @@ int main()
             ofs << "JUNK\n[Bottle]{{{Glass}}}\x1f" "Milk Bottle\n";
         }
 
-        // Write AutoTags_en.ini with specific rule + wildcard '*' catch-all
+        // Write AutoTags_en.ini + extra locale AutoTags_ptbr.ini with specific rule + wildcard '*' catch-all
         {
             std::ofstream ofs(tmp / "ItemSorter" / "FIS" / "AutoTags" / "AutoTags_en.ini");
             ofs << "[WEAP]\nRevolver=[Pistol]\n";
             ofs << "[MISC]\n*=[CustomWild]\n";
         }
+        {
+            std::ofstream ofs(tmp / "ItemSorter" / "FIS" / "AutoTags" / "AutoTags_ptbr.ini");
+            ofs << "[ALCH]\nMedicina={SubTest}\n";
+        }
 
         FallUIIcons::FallUIIconRegistry reg;
         CHECK(reg.InitializeFromInterfaceDir(tmp));
-        CHECK(reg.TagCount() == 7);
+        CHECK(reg.TagCount() == 8);
         CHECK(reg.ColorCount() >= 6);
+        {
+            const auto addons = reg.LoadedAddonNames();
+            CHECK(addons.size() == 1);
+            CHECK(addons[0] == "CustomAddon");
+        }
 
         FallUIIcons::ResolvedFallUIIcon res;
         // 4a. World-only category returns false
@@ -369,6 +379,29 @@ int main()
         CHECK(reg.RasterizeResolvedIcon(res, 32, rgba));
         CHECK(reg.LoadedSwfCount() == 1);
         CHECK(rgba.size() == 32u * 32u * 4u);
+
+        // 4g. Offline Modern Age checks: |+{Tag} wrapper, built-in white colorname, dual-color subicon baking, and non-English AutoTags
+        FallUIIcons::ResolvedFallUIIcon resSub;
+        CHECK(reg.ResolveIcon("|+{SubTest} Prototype", TargetInfo::ItemKind::MiscJunk, resSub));
+        CHECK(resSub.subSymbolName == "test.spritesquare");
+        CHECK(resSub.hasColor && resSub.rgbColor == 0x81B5CBu);
+        CHECK(resSub.hasSubColor && resSub.subRgbColor == 0xFFFFFFu);
+        std::vector<std::uint8_t> subRgba;
+        bool usedFb = false;
+        bool baked = false;
+        CHECK(reg.RasterizeResolvedIcon(resSub, 32, subRgba, &usedFb, true, &baked));
+        CHECK(baked);
+        CHECK(subRgba.size() == 32u * 32u * 4u);
+
+        std::vector<std::uint8_t> monoSubRgba;
+        bool bakedMono = true;
+        CHECK(reg.RasterizeResolvedIcon(resSub, 32, monoSubRgba, &usedFb, false, &bakedMono));
+        CHECK(!bakedMono);
+
+        FallUIIcons::ResolvedFallUIIcon resPt;
+        CHECK(reg.ResolveIcon("Medicina Especial", TargetInfo::ItemKind::Aid, resPt));
+        CHECK(resPt.subSymbolName == "test.spritesquare");
+        CHECK(TargetInfo::CleanDisplayName("|+{SubTest} Prototype", true) == "Prototype");
 
         std::filesystem::remove_all(tmp);
     }
@@ -420,6 +453,278 @@ int main()
             CHECK(reg.RasterizeResolvedIcon(res, 32, rgba));
             CHECK(rgba.size() == 32u * 32u * 4u);
         }
+
+        const std::filesystem::path modernAgeDir =
+            "E:/Mods/Vortex Mods/fallout4/FIS - Modern Age Icons Addon-66093-1-2-1HF-1690222011/Interface";
+        const std::filesystem::path modernAgeXml =
+            modernAgeDir / "ItemSorter" / "FIS" / "TagConfiguration.Addons" / "ModernAgeAddonTags.xml";
+        const std::filesystem::path modernAgeSwf =
+            modernAgeDir / "ItemSorter" / "FIS" / "TagConfiguration.Addons" / "ModernAgeAddonIconLib.swf";
+        if (std::filesystem::exists(modernAgeXml) && std::filesystem::exists(modernAgeSwf)) {
+            FallUIIcons::SwfIconFile swf;
+            CHECK(swf.LoadFromFile(modernAgeSwf));
+            CHECK(swf.SymbolCount() >= 150);
+
+            if (std::filesystem::exists(gameInterface / "ItemSorter" / "ColorSets" / "Default.xml")) {
+                const auto tmpMod = std::filesystem::temp_directory_path() / "fap_modern_age_test";
+                std::filesystem::remove_all(tmpMod);
+                std::filesystem::create_directories(tmpMod / "ItemSorter" / "ColorSets");
+                std::filesystem::create_directories(tmpMod / "ItemSorter" / "FIS" / "TagConfiguration.Addons");
+                std::filesystem::create_directories(tmpMod / "ItemSorter" / "FIS" / "AutoTags");
+                std::filesystem::copy_file(
+                    gameInterface / "ItemSorter" / "ColorSets" / "Default.xml",
+                    tmpMod / "ItemSorter" / "ColorSets" / "Default.xml");
+                std::filesystem::copy_file(
+                    modernAgeXml,
+                    tmpMod / "ItemSorter" / "FIS" / "TagConfiguration.Addons" / "ModernAgeAddonTags.xml");
+                std::filesystem::copy_file(
+                    modernAgeSwf,
+                    tmpMod / "ItemSorter" / "FIS" / "TagConfiguration.Addons" / "ModernAgeAddonIconLib.swf");
+                {
+                    std::ofstream ptbr(tmpMod / "ItemSorter" / "FIS" / "AutoTags" / "AutoTags_ptbr.ini");
+                    ptbr << "[alch]\nNuka=RGD\n";
+                }
+
+                FallUIIcons::FallUIIconRegistry modReg;
+                CHECK(modReg.InitializeFromInterfaceDir(tmpMod));
+                FallUIIcons::ResolvedFallUIIcon rSub;
+                // ModernAgeAddonTags maps ARS to icon + subicon with dual colorname="red,white"
+                CHECK(modReg.ResolveIcon("|+{ARS} M4A1 Carbine", TargetInfo::ItemKind::Weapon, rSub));
+                CHECK(rSub.symbolName == "ha_ar15");
+                CHECK(rSub.subSymbolName == "ha_muzzle_2");
+                CHECK(rSub.hasColor);
+                CHECK(rSub.hasSubColor);
+                CHECK(rSub.rgbColor != rSub.subRgbColor);
+                std::vector<std::uint8_t> compRgba;
+                bool usedFb = false;
+                bool baked = false;
+                CHECK(modReg.RasterizeResolvedIcon(rSub, 32, compRgba, &usedFb, true, &baked));
+                CHECK(baked);
+                CHECK(compRgba.size() == 32u * 32u * 4u);
+
+                std::vector<std::uint8_t> monoRgba;
+                bool bakedMono = true;
+                CHECK(modReg.RasterizeResolvedIcon(rSub, 32, monoRgba, &usedFb, false, &bakedMono));
+                CHECK(!bakedMono);
+                CHECK(monoRgba.size() == 32u * 32u * 4u);
+
+                // Verify CleanDisplayName strips {Tag} and |+ prefix
+                CHECK(TargetInfo::CleanDisplayName("|+{ARS} M4A1 Carbine", true) == "M4A1 Carbine");
+
+                // Verify non-English AutoTags_*.ini rule works
+                FallUIIcons::ResolvedFallUIIcon rPt;
+                CHECK(modReg.ResolveIcon("Nuka-Cola Quantum", TargetInfo::ItemKind::Aid, rPt));
+                CHECK(rPt.subSymbolName == "bb_blast");
+
+                std::filesystem::remove_all(tmpMod);
+            }
+        }
+    }
+
+    // 6. Unconditional FallUIIconLibrary.ini & FallUI.ini parity tests (ColorSet, bIconsColored, bIconsEffect, Brightness/Saturation, Shading)
+    {
+        const auto tmpRoot = std::filesystem::temp_directory_path() / "fap_fallui_colorset_test";
+        std::filesystem::remove_all(tmpRoot);
+        const auto tmpIface = tmpRoot / "Interface";
+        const auto tmpMcm = tmpRoot / "MCM" / "Settings";
+        std::filesystem::create_directories(tmpIface / "ItemSorter" / "ColorSets");
+        std::filesystem::create_directories(tmpMcm);
+
+        {
+            std::ofstream ini(tmpMcm / "FallUIIconLibrary.ini");
+            ini << "[MainSettings]\n";
+            ini << "sIconsColorSet=CustomSet.xml\n";
+            ini << "bIconsColored=1\n";
+            ini << "bIconsEffect=1\n";
+            ini << "iIconsBrightness=50\n";
+            ini << "iIconsSaturation=100\n";
+        }
+        {
+            std::ofstream falluiIni(tmpMcm / "FallUI.ini");
+            falluiIni << "[ItemSorter]\n";
+            falluiIni << "sItemSorterTagConfig=Auto-detect.xml\n";
+        }
+        {
+            std::ofstream autoDetectXml(tmpIface / "ItemSorter" / "Auto-detect.xml");
+            autoDetectXml << "<TagConfiguration></TagConfiguration>\n";
+        }
+        {
+            std::ofstream defXml(tmpIface / "ItemSorter" / "ColorSets" / "Default.xml");
+            defXml << "<colors>\n  <color name=\"c_only_default\" hex=\"#FF0000\" />\n</colors>\n";
+        }
+        {
+            std::ofstream customXml(tmpIface / "ItemSorter" / "ColorSets" / "CustomSet.xml");
+            customXml << "<colors>\n  <color name=\"c_custom\" hex=\"#00FF80\" />\n</colors>\n";
+            customXml << "<tags>\n  <tag keyword=\"Note\" colorname=\"c_custom\" />\n</tags>\n";
+        }
+        {
+            std::ofstream fisXml(tmpIface / "ItemSorter" / "FIS (FallUI Item Sorter).xml");
+            fisXml << "<tags iconlibraryfile=\"FallUI_IconLib.swf\">\n";
+            fisXml << "  <tag keyword=\"Ammo\" icon=\"ammo\" colorname=\"c_custom\" />\n";
+            fisXml << "  <tag keyword=\"Note\" icon=\"note\" colorname=\"c_only_default\" />\n";
+            fisXml << "  <tag keyword=\"Junk\" icon=\"junk\" subicon=\"sub\" colorname=\"c_only_default,c_custom\" />\n";
+            fisXml << "</tags>\n";
+        }
+
+        FallUIIcons::FallUIIconRegistry csReg;
+        CHECK(csReg.InitializeFromInterfaceDir(tmpIface));
+        CHECK(csReg.ActiveColorSetName() == "CustomSet.xml");
+        CHECK(csReg.IconsEffectEnabled());
+
+        FallUIIcons::ResolvedFallUIIcon rcs;
+        CHECK(csReg.ResolveIcon("{Ammo} 10mm Round", TargetInfo::ItemKind::Ammo, rcs));
+        CHECK(rcs.symbolName == "ammo");
+        CHECK(rcs.hasColor);
+        // 50% brightness on #00FF80 -> #008040 (allow +/-1 rounding)
+        const int cr = static_cast<int>((rcs.rgbColor >> 16) & 0xFFu);
+        const int cg = static_cast<int>((rcs.rgbColor >> 8) & 0xFFu);
+        const int cb = static_cast<int>(rcs.rgbColor & 0xFFu);
+        CHECK(cr == 0);
+        CHECK(std::abs(cg - 128) <= 1);
+        CHECK(std::abs(cb - 64) <= 1);
+
+        // Custom ColorSet does NOT preload Default.xml or apply color-only <tag> overrides (1:1 FallUI Inventory)
+        FallUIIcons::ResolvedFallUIIcon rNote;
+        CHECK(csReg.ResolveIcon("{Note} Scrap Note", TargetInfo::ItemKind::BookNote, rNote));
+        CHECK(!rNote.hasColor);
+
+        // Undefined primary in dual "primary,sub" never leaks sub color into primary
+        FallUIIcons::ResolvedFallUIIcon rJunk;
+        CHECK(csReg.ResolveIcon("{Junk} Tin Can", TargetInfo::ItemKind::MiscJunk, rJunk));
+        CHECK(!rJunk.hasColor);
+        CHECK(rJunk.hasSubColor);
+
+        // Saturation=0 removes chroma cleanly
+        {
+            std::ofstream ini(tmpMcm / "FallUIIconLibrary.ini");
+            ini << "[MainSettings]\n";
+            ini << "sIconsColorSet=CustomSet.xml\n";
+            ini << "bIconsColored=1\n";
+            ini << "bIconsEffect=1\n";
+            ini << "iIconsBrightness=100\n";
+            ini << "iIconsSaturation=0\n";
+        }
+        CHECK(csReg.InitializeFromInterfaceDir(tmpIface));
+        CHECK(csReg.ResolveIcon("{Ammo} 10mm Round", TargetInfo::ItemKind::Ammo, rcs));
+        CHECK(rcs.hasColor && rcs.rgbColor == 0xFFFFFFu);
+
+        // bIconsColored=0 strips all tag colors and sets ColorCount() == 0
+        {
+            std::ofstream ini(tmpMcm / "FallUIIconLibrary.ini");
+            ini << "[MainSettings]\n";
+            ini << "sIconsColorSet=CustomSet.xml\n";
+            ini << "bIconsColored=0\n";
+            ini << "bIconsEffect=0\n";
+        }
+        CHECK(csReg.InitializeFromInterfaceDir(tmpIface));
+        CHECK(!csReg.IconsEffectEnabled());
+        CHECK(csReg.ColorCount() == 0u);
+        CHECK(csReg.ResolveIcon("{Ammo} 10mm Round", TargetInfo::ItemKind::Ammo, rcs));
+        CHECK(!rcs.hasColor);
+
+        csReg.Clear();
+        CHECK(csReg.IconsEffectEnabled());
+        CHECK(csReg.ActiveColorSetName() == "Default.xml");
+
+        // Direct ApplyIconRadialShading verification & bounds guards
+        std::vector<std::uint8_t> shadeBuf(16u * 16u * 4u, 255u);
+        shadeBuf[0] = 255u; shadeBuf[1] = 255u; shadeBuf[2] = 255u; shadeBuf[3] = 0u; // alpha=0 top-left
+        FallUIIcons::ApplyIconRadialShading(shadeBuf, 16);
+        CHECK(shadeBuf[0] == 255u && shadeBuf[3] == 0u);
+        const std::size_t midIdx = (8u * 16u + 8u) * 4u;
+        const std::size_t edgeIdx = (0u * 16u + 15u) * 4u;
+        CHECK(shadeBuf[midIdx] >= 245u);
+        CHECK(shadeBuf[edgeIdx] <= 185u && shadeBuf[edgeIdx] >= 165u);
+        std::vector<std::uint8_t> badBuf(12, 200u);
+        FallUIIcons::ApplyIconRadialShading(badBuf, 0);
+        FallUIIcons::ApplyIconRadialShading(badBuf, 16);
+        CHECK(badBuf[0] == 200u);
+
+        // Real-disk Rescaled and Fixed Colors.xml test if present
+        const std::filesystem::path gameInterface = "E:/SteamLibrary/steamapps/common/Fallout 4/Data/Interface";
+        const auto realRescaled = gameInterface / "ItemSorter" / "ColorSets" / "Rescaled and Fixed Colors.xml";
+        const auto realFisXml = gameInterface / "ItemSorter" / "FIS (FallUI Item Sorter).xml";
+        const auto realSwf = gameInterface / "FallUI_IconLib.swf";
+        if (std::filesystem::exists(realRescaled) && std::filesystem::exists(realFisXml) && std::filesystem::exists(realSwf)) {
+            std::filesystem::copy_file(
+                realRescaled,
+                tmpIface / "ItemSorter" / "ColorSets" / "Rescaled and Fixed Colors.xml",
+                std::filesystem::copy_options::overwrite_existing);
+            std::filesystem::copy_file(
+                realSwf,
+                tmpIface / "FallUI_IconLib.swf",
+                std::filesystem::copy_options::overwrite_existing);
+            {
+                std::ofstream ini(tmpMcm / "FallUIIconLibrary.ini");
+                ini << "[MainSettings]\n";
+                ini << "sIconsColorSet=Rescaled and Fixed Colors.xml\n";
+                ini << "bIconsColored=1\n";
+                ini << "bIconsEffect=1\n";
+                ini << "iIconsBrightness=100\n";
+                ini << "iIconsSaturation=100\n";
+            }
+            std::filesystem::copy_file(
+                realFisXml,
+                tmpIface / "ItemSorter" / "FIS (FallUI Item Sorter).xml",
+                std::filesystem::copy_options::overwrite_existing);
+            std::filesystem::copy_file(
+                gameInterface / "ItemSorter" / "ColorSets" / "Default.xml",
+                tmpIface / "ItemSorter" / "ColorSets" / "Default.xml",
+                std::filesystem::copy_options::overwrite_existing);
+
+            FallUIIcons::FallUIIconRegistry realCsReg;
+            CHECK(realCsReg.InitializeFromInterfaceDir(tmpIface));
+            CHECK(realCsReg.ActiveColorSetName() == "Rescaled and Fixed Colors.xml");
+            CHECK(realCsReg.IconsEffectEnabled());
+
+            FallUIIcons::ResolvedFallUIIcon rFood, rClothes, rGrenade, rShells, rCorn, rRaider;
+            CHECK(realCsReg.ResolveIcon("[Food] Pop's Dog Food", TargetInfo::ItemKind::Aid, rFood));
+            CHECK(rFood.hasColor && rFood.rgbColor == 0xE9B49Bu);
+            CHECK(realCsReg.ResolveIcon("[Clothes] Steel Plate Arm Left", TargetInfo::ItemKind::Armor, rClothes));
+            CHECK(rClothes.hasColor && rClothes.rgbColor == 0xE9DA93u);
+            CHECK(realCsReg.ResolveIcon("[Grenade] Fragmentation Grenade", TargetInfo::ItemKind::Weapon, rGrenade));
+            CHECK(rGrenade.hasColor && rGrenade.rgbColor == 0xACC1A3u);
+            CHECK(realCsReg.ResolveIcon("[AmmoShells] Shotgun Shell", TargetInfo::ItemKind::Ammo, rShells));
+            CHECK(!rShells.hasColor);
+            CHECK(realCsReg.ResolveIcon("[Vegetables] Corn", TargetInfo::ItemKind::Aid, rCorn));
+            CHECK(!rCorn.hasColor);
+            CHECK(realCsReg.ResolveIcon("[SetRaider] Raider Right Arm", TargetInfo::ItemKind::Armor, rRaider));
+            CHECK(!rRaider.hasColor);
+
+            std::vector<std::uint8_t> shadedRgba;
+            CHECK(realCsReg.RasterizeResolvedIcon(rFood, 32, shadedRgba));
+            int minLit = 255;
+            int maxLit = 0;
+            for (std::size_t i = 0; i + 3 < shadedRgba.size(); i += 4) {
+                if (shadedRgba[i + 3] > 200u) {
+                    minLit = std::min(minLit, static_cast<int>(shadedRgba[i]));
+                    maxLit = std::max(maxLit, static_cast<int>(shadedRgba[i]));
+                }
+            }
+            CHECK(maxLit >= 230 && minLit <= 220);
+
+            // Toggle bIconsEffect=0 -> flat white pixels (255) on rasterized monochrome tile
+            {
+                std::ofstream ini(tmpMcm / "FallUIIconLibrary.ini");
+                ini << "[MainSettings]\n";
+                ini << "sIconsColorSet=Rescaled and Fixed Colors.xml\n";
+                ini << "bIconsColored=1\n";
+                ini << "bIconsEffect=0\n";
+            }
+            CHECK(realCsReg.InitializeFromInterfaceDir(tmpIface));
+            CHECK(!realCsReg.IconsEffectEnabled());
+            std::vector<std::uint8_t> flatRgba;
+            CHECK(realCsReg.RasterizeResolvedIcon(rFood, 32, flatRgba));
+            int minFlat = 255;
+            for (std::size_t i = 0; i + 3 < flatRgba.size(); i += 4) {
+                if (flatRgba[i + 3] > 200u) {
+                    minFlat = std::min(minFlat, static_cast<int>(flatRgba[i]));
+                }
+            }
+            CHECK(minFlat == 255);
+        }
+
+        std::filesystem::remove_all(tmpRoot);
     }
 
     std::cout << "[TEST] test_fallui_icons PASSED" << std::endl;

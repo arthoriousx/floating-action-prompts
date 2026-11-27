@@ -30,6 +30,31 @@ int main()
         CHECK(snap.companionDeprioritizeLoot == true);
         CHECK(snap.blockHiddenCompanionInteractions == true);
         CHECK_NEAR(snap.grabHoldDelay, 1.50f, 0.0001f);
+        CHECK(snap.featuredItemGraceMs == 600);
+        CHECK(snap.aimingPromptMode == 1);
+        CHECK(snap.limitNpcPromptDistance == true);
+        CHECK_NEAR(snap.npcMaxDistance, 185.0f, 0.0001f);
+        CHECK(snap.npcKeepRangedActions == true);
+        CHECK_NEAR(snap.npcRangedMaxDistance, 450.0f, 0.0001f);
+        CHECK(snap.blockPromptsThroughWalls == true);
+        CHECK(snap.tpAssistEnabled == true);
+        CHECK(snap.tpAssistMode == 0);
+        CHECK_NEAR(snap.tpAssistMaxDistance, 130.0f, 0.0001f);
+        CHECK_NEAR(snap.tpAssistConeDegrees, 55.0f, 0.0001f);
+        CHECK(snap.tpAssistLockMs == 300);
+        CHECK(snap.tpAssistItems == true);
+        CHECK(snap.tpAssistDoors == true);
+        CHECK(snap.tpAssistFurniture == true);
+        CHECK(snap.tpAssistContainers == false);
+        CHECK(snap.holdToActivateEnabled == true);
+        CHECK_NEAR(snap.holdToActivateDuration, 0.50f, 0.0001f);
+        CHECK(snap.holdRingStyle == 0);
+        CHECK(snap.holdDrink == true);
+        CHECK(snap.holdSitSleep == true);
+        CHECK(snap.holdStealPickpocket == true);
+        CHECK(snap.holdEatCannibal == false);
+        CHECK(snap.holdCraftPowerArmor == false);
+        CHECK(snap.holdCustomVerbs.empty());
 
         CHECK_NEAR(snap.doorOffset.x, 0.0f, 0.0001f);
         CHECK_NEAR(snap.doorOffset.y, 0.0f, 0.0001f);
@@ -52,6 +77,7 @@ int main()
         CHECK(snap.inlineItemInfo == false);
         CHECK(snap.modernTextMode == 0);
         CHECK(snap.showDoorDestination == true);
+        CHECK(snap.showInteractableHeader == true);
         CHECK(snap.cleanSorterTags == true);
         CHECK_NEAR(snap.modernBgOpacity, 0.0f, 0.0001f);
         CHECK(snap.modernBorder == false);
@@ -107,6 +133,7 @@ int main()
         CHECK(snap.showWeaponArmorStats == true);
         CHECK(snap.showNpcStats == true);
         CHECK(snap.infoCardInQuickContainer == true);
+        CHECK(snap.infoCardConditionDisplay == 3);
 
         CHECK(snap.floatQuickContainer == true);
         CHECK(snap.modernQuickContainer == true);
@@ -134,6 +161,7 @@ int main()
         CHECK(snap.qcPinTaggedForSearch == true);
         CHECK(snap.qcPinCaps == true);
         CHECK(snap.qcTakeDebounceMs == 0);
+        CHECK(snap.itemConditionDisplay == 1);
         CHECK(snap.qcCategoryOrder == DefaultQuickLootCategoryOrder());
 
         CHECK(!cfg.HasUnsavedChanges());
@@ -147,6 +175,14 @@ int main()
         edit.companionMaxDistance = 10.0f;
         edit.companionCombatMaxDistance = -5.0f;
         edit.grabHoldDelay = 0.05f;
+        edit.featuredItemGraceMs = -50;
+        edit.aimingPromptMode = 9;
+        edit.npcMaxDistance = 10.0f;
+        edit.tpAssistMode = 9;
+        edit.tpAssistMaxDistance = 10.0f;
+        edit.tpAssistConeDegrees = 5.0f;
+        edit.holdToActivateDuration = 0.01f;
+        edit.holdCustomVerbs = "  harvest,  disarm\r\n";
         edit.crimeTextColor = 0xFFAA1122u;
         edit.doorOffset.z = -35.0f;
         edit.furnitureOffset = { -250.0f, 300.0f, 999.0f };
@@ -197,16 +233,38 @@ int main()
         CHECK_NEAR(clamped.companionMaxDistance, 50.0f, 0.0001f);
         CHECK_NEAR(clamped.companionCombatMaxDistance, 0.0f, 0.0001f);
         CHECK_NEAR(clamped.grabHoldDelay, 0.30f, 0.0001f);
+        CHECK(clamped.featuredItemGraceMs == 0);
+        CHECK(clamped.aimingPromptMode == 2);
+        CHECK_NEAR(clamped.npcMaxDistance, 60.0f, 0.0001f);
+        CHECK(clamped.tpAssistMode == 1);
+        CHECK_NEAR(clamped.tpAssistMaxDistance, 60.0f, 0.0001f);
+        CHECK_NEAR(clamped.tpAssistConeDegrees, 20.0f, 0.0001f);
+        CHECK_NEAR(clamped.holdToActivateDuration, 0.20f, 0.0001f);
+        CHECK(clamped.holdCustomVerbs == "harvest,  disarm");
         CHECK(clamped.crimeTextColor == 0xAA1122u);
 
         edit.companionMaxDistance = 999.0f;
         edit.companionCombatMaxDistance = 999.0f;
         edit.grabHoldDelay = 9.0f;
+        edit.featuredItemGraceMs = 9999;
+        edit.aimingPromptMode = -2;
+        edit.npcMaxDistance = 999.0f;
+        edit.tpAssistMode = -3;
+        edit.tpAssistMaxDistance = 999.0f;
+        edit.tpAssistConeDegrees = 180.0f;
+        edit.holdToActivateDuration = 9.0f;
         edit.qcTakeDebounceMs = -50;
         cfg.ApplySnapshot(edit, true);
         CHECK_NEAR(cfg.GetSnapshot().companionMaxDistance, 500.0f, 0.0001f);
         CHECK_NEAR(cfg.GetSnapshot().companionCombatMaxDistance, 500.0f, 0.0001f);
         CHECK_NEAR(cfg.GetSnapshot().grabHoldDelay, 2.00f, 0.0001f);
+        CHECK(cfg.GetSnapshot().featuredItemGraceMs == 2000);
+        CHECK(cfg.GetSnapshot().aimingPromptMode == 0);
+        CHECK_NEAR(cfg.GetSnapshot().npcMaxDistance, 500.0f, 0.0001f);
+        CHECK(cfg.GetSnapshot().tpAssistMode == 0);
+        CHECK_NEAR(cfg.GetSnapshot().tpAssistMaxDistance, 250.0f, 0.0001f);
+        CHECK_NEAR(cfg.GetSnapshot().tpAssistConeDegrees, 90.0f, 0.0001f);
+        CHECK_NEAR(cfg.GetSnapshot().holdToActivateDuration, 2.00f, 0.0001f);
         CHECK(cfg.GetSnapshot().qcTakeDebounceMs == 0);
         CHECK_NEAR(clamped.doorOffset.z, -35.0f, 0.0001f);
         CHECK_NEAR(clamped.furnitureOffset.x, -200.0f, 0.0001f);
@@ -262,6 +320,29 @@ int main()
         edit.companionDeprioritizeLoot = false;
         edit.blockHiddenCompanionInteractions = false;
         edit.grabHoldDelay = 1.25f;
+        edit.featuredItemGraceMs = 850;
+        edit.aimingPromptMode = 2;
+        edit.limitNpcPromptDistance = false;
+        edit.npcMaxDistance = 260.0f;
+        edit.npcKeepRangedActions = false;
+        edit.npcRangedMaxDistance = 725.0f;
+        edit.tpAssistEnabled = false;
+        edit.tpAssistMode = 1;
+        edit.tpAssistMaxDistance = 175.0f;
+        edit.tpAssistConeDegrees = 40.0f;
+        edit.tpAssistItems = false;
+        edit.tpAssistDoors = false;
+        edit.tpAssistFurniture = false;
+        edit.tpAssistContainers = true;
+        edit.holdToActivateEnabled = false;
+        edit.holdToActivateDuration = 0.85f;
+        edit.holdRingStyle = 1;
+        edit.holdDrink = false;
+        edit.holdSitSleep = false;
+        edit.holdStealPickpocket = false;
+        edit.holdEatCannibal = true;
+        edit.holdCraftPowerArmor = true;
+        edit.holdCustomVerbs = "HARVEST,DISARM";
         edit.highlightCrimePrompts = false;
         edit.crimeTextColor = 0xCC3311u;
         edit.doorOffset.z = -35.0f;
@@ -339,6 +420,29 @@ int main()
         CHECK(loaded.companionDeprioritizeLoot == false);
         CHECK(loaded.blockHiddenCompanionInteractions == false);
         CHECK_NEAR(loaded.grabHoldDelay, 1.25f, 0.0001f);
+        CHECK(loaded.featuredItemGraceMs == 850);
+        CHECK(loaded.aimingPromptMode == 2);
+        CHECK(loaded.limitNpcPromptDistance == false);
+        CHECK_NEAR(loaded.npcMaxDistance, 260.0f, 0.0001f);
+        CHECK(loaded.npcKeepRangedActions == false);
+        CHECK_NEAR(loaded.npcRangedMaxDistance, 725.0f, 0.0001f);
+        CHECK(loaded.tpAssistEnabled == false);
+        CHECK(loaded.tpAssistMode == 1);
+        CHECK_NEAR(loaded.tpAssistMaxDistance, 175.0f, 0.0001f);
+        CHECK_NEAR(loaded.tpAssistConeDegrees, 40.0f, 0.0001f);
+        CHECK(loaded.tpAssistItems == false);
+        CHECK(loaded.tpAssistDoors == false);
+        CHECK(loaded.tpAssistFurniture == false);
+        CHECK(loaded.tpAssistContainers == true);
+        CHECK(loaded.holdToActivateEnabled == false);
+        CHECK_NEAR(loaded.holdToActivateDuration, 0.85f, 0.0001f);
+        CHECK(loaded.holdRingStyle == 1);
+        CHECK(loaded.holdDrink == false);
+        CHECK(loaded.holdSitSleep == false);
+        CHECK(loaded.holdStealPickpocket == false);
+        CHECK(loaded.holdEatCannibal == true);
+        CHECK(loaded.holdCraftPowerArmor == true);
+        CHECK(loaded.holdCustomVerbs == "HARVEST,DISARM");
         CHECK(loaded.highlightCrimePrompts == false);
         CHECK(loaded.crimeTextColor == 0xCC3311u);
         CHECK_NEAR(loaded.doorOffset.z, -35.0f, 0.0001f);
@@ -510,6 +614,44 @@ int main()
         CHECK_NEAR(edgeCfg.modernOpacity, 0.85f, 0.0001f);
         CHECK_NEAR(edgeCfg.infoCardDelaySeconds, 1.0f, 0.0001f);
         CHECK_NEAR(edgeCfg.itemOffset.z, -8.0f, 0.0001f);
+
+        {
+            std::ofstream f(tempDir / "clamp_v2.ini");
+            f << "[General]\nfNpcRangedMaxDistance=-50.0\nbBlockPromptsThroughWalls=0\n";
+            f << "[ThirdPersonAssist]\niTpAssistMode=9\niTpAssistLockMs=2500\n";
+            f << "[HoldToActivate]\niHoldRingStyle=7\n";
+            f << "[InfoCard]\niInfoCardConditionDisplay=9\n";
+            f << "[QuickContainer]\niItemConditionDisplay=9\n";
+        }
+        CHECK(cfg.Load(tempDir / "clamp_v2.ini"));
+        const auto clampV2 = cfg.GetSnapshot();
+        CHECK_NEAR(clampV2.npcRangedMaxDistance, 0.0f, 0.0001f);
+        CHECK(clampV2.blockPromptsThroughWalls == false);
+        CHECK(clampV2.tpAssistMode == 1);
+        CHECK(clampV2.tpAssistLockMs == 1000);
+        CHECK(clampV2.holdRingStyle == 1);
+        CHECK(clampV2.infoCardConditionDisplay == 3);
+        CHECK(clampV2.itemConditionDisplay == 3);
+
+        // Save/Load round-trip for iItemConditionDisplay, iInfoCardConditionDisplay (0..3), bShowInteractableHeader, bBlockPromptsThroughWalls, iTpAssistLockMs
+        for (int condMode : { 0, 1, 2, 3 }) {
+            ConfigData condEdit = cfg.GetSnapshot();
+            condEdit.itemConditionDisplay = condMode;
+            condEdit.infoCardConditionDisplay = condMode;
+            condEdit.showInteractableHeader = (condMode % 2 == 0);
+            condEdit.blockPromptsThroughWalls = (condMode % 2 == 1);
+            condEdit.tpAssistLockMs = condMode * 150;
+            cfg.ApplySnapshot(condEdit, false);
+            const auto condPath = tempDir / ("cond_" + std::to_string(condMode) + ".ini");
+            CHECK(cfg.Save(condPath));
+            cfg.ResetDefaults();
+            CHECK(cfg.Load(condPath));
+            CHECK(cfg.GetSnapshot().itemConditionDisplay == condMode);
+            CHECK(cfg.GetSnapshot().infoCardConditionDisplay == condMode);
+            CHECK(cfg.GetSnapshot().showInteractableHeader == (condMode % 2 == 0));
+            CHECK(cfg.GetSnapshot().blockPromptsThroughWalls == (condMode % 2 == 1));
+            CHECK(cfg.GetSnapshot().tpAssistLockMs == condMode * 150);
+        }
     }
 
     std::filesystem::remove_all(tempDir);

@@ -116,13 +116,23 @@ int main()
         CHECK_NEAR(outCustom.z, 93.0f, 0.001f);
     }
 
-    // 8. Door & Furniture marker node name matching (case-insensitive)
+    // 8. Door & Furniture marker node name matching (token-based & case-insensitive)
     CHECK(AnchorManager::IsDoorAnchorNodeName("DoorHandle01"));
     CHECK(AnchorManager::IsDoorAnchorNodeName("Lock_Cylinder"));
     CHECK(AnchorManager::IsDoorAnchorNodeName("BrassKnob"));
     CHECK(AnchorManager::IsDoorAnchorNodeName("DoorLatch"));
+    CHECK(AnchorManager::IsDoorAnchorNodeName("Padlock_01"));
+    CHECK(AnchorManager::IsDoorAnchorNodeName("DoorLock:0"));
+    CHECK(AnchorManager::IsDoorAnchorNodeName("MetalLatch"));
+    CHECK(AnchorManager::IsDoorAnchorNodeName("DeadBolt"));
     CHECK(!AnchorManager::IsDoorAnchorNodeName("DoorFrame"));
     CHECK(!AnchorManager::IsDoorAnchorNodeName("CollisionMesh"));
+    CHECK(!AnchorManager::IsDoorAnchorNodeName("AirlockDoor"));
+    CHECK(!AnchorManager::IsDoorAnchorNodeName("CellBlockGate"));
+    CHECK(!AnchorManager::IsDoorAnchorNodeName("InterlockFrame"));
+    CHECK(!AnchorManager::IsDoorAnchorNodeName("Roadblock"));
+    CHECK(!AnchorManager::IsDoorAnchorNodeName("UnlockMarker"));
+    CHECK(!AnchorManager::IsDoorAnchorNodeName("ClockDoor"));
     CHECK(!AnchorManager::IsDoorAnchorNodeName(""));
 
     CHECK(AnchorManager::IsFurnitureMarkerNodeName("FurnitureMarker0"));
@@ -222,6 +232,37 @@ int main()
         CHECK_NEAR(nanBoth.x, refPos.x, 0.001f);
         CHECK_NEAR(nanBoth.y, refPos.y, 0.001f);
         CHECK_NEAR(nanBoth.z, refPos.z, 0.001f);
+    }
+
+    // 11. SelectSafeDoorAnchorPosition rejects floor-origin pivots and keeps mid-height handle nodes
+    {
+        const Vector3 refPos{ 100.0f, 200.0f, 0.0f };
+        const Vector3 doorCenter{ 120.0f, 200.0f, 65.0f };
+        const float minZ = 0.0f;
+        const float maxZ = 130.0f;
+
+        // 11a. Degenerate floor-level handle pivot at z=0 falls back to doorCenter (z=65)
+        const Vector3 floorNode{ 100.0f, 200.0f, 0.0f };
+        const Vector3 floorFallback = AnchorManager::SelectSafeDoorAnchorPosition(
+            refPos, true, doorCenter, minZ, maxZ, true, floorNode);
+        CHECK_NEAR(floorFallback.x, doorCenter.x, 0.001f);
+        CHECK_NEAR(floorFallback.y, doorCenter.y, 0.001f);
+        CHECK_NEAR(floorFallback.z, doorCenter.z, 0.001f);
+
+        // 11b. Valid mid-height handle node at z=75 is preserved
+        const Vector3 validHandle{ 138.0f, 200.0f, 75.0f };
+        const Vector3 keptHandle = AnchorManager::SelectSafeDoorAnchorPosition(
+            refPos, true, doorCenter, minZ, maxZ, true, validHandle);
+        CHECK_NEAR(keptHandle.x, validHandle.x, 0.001f);
+        CHECK_NEAR(keptHandle.y, validHandle.y, 0.001f);
+        CHECK_NEAR(keptHandle.z, validHandle.z, 0.001f);
+
+        // 11c. Wildly offset/out-of-bounds node falls back to doorCenter
+        const Vector3 farNode{ 500.0f, 200.0f, 75.0f };
+        const Vector3 farFallback = AnchorManager::SelectSafeDoorAnchorPosition(
+            refPos, true, doorCenter, minZ, maxZ, true, farNode);
+        CHECK_NEAR(farFallback.x, doorCenter.x, 0.001f);
+        CHECK_NEAR(farFallback.z, doorCenter.z, 0.001f);
     }
 
     std::cout << "[TEST] test_anchor PASSED" << std::endl;

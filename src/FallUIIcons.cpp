@@ -113,6 +113,7 @@ namespace FallUIIcons
             std::string s = TrimSv(a_raw);
             while (s.size() >= 2 &&
                    ((s.front() == '[' && s.back() == ']') ||
+                    (s.front() == '{' && s.back() == '}') ||
                     (s.front() == '|' && s.back() == '|'))) {
                 s = TrimSv(std::string_view(s).substr(1, s.size() - 2));
             }
@@ -933,7 +934,7 @@ namespace FallUIIcons
             return {};
         }
 
-        // Skip leading simple HTML tags like <font...>
+        // Skip leading simple HTML tags (<font...>) and FIS subtitle markers (|+)
         std::string_view cur = a_rawName;
         while (true) {
             const auto first = cur.find_first_not_of(" \t\r\n");
@@ -947,6 +948,10 @@ namespace FallUIIcons
                     break;
                 }
                 cur.remove_prefix(close + 1);
+                continue;
+            }
+            if (cur.starts_with("|+")) {
+                cur.remove_prefix(2);
                 continue;
             }
             break;
@@ -964,6 +969,19 @@ namespace FallUIIcons
                 if (cur[i] == '[') {
                     ++depth;
                 } else if (cur[i] == ']') {
+                    if (--depth == 0) {
+                        closePos = i;
+                        break;
+                    }
+                }
+            }
+        } else if (cur.front() == '{') {
+            int depth = 0;
+            const std::size_t limit = std::min<std::size_t>(cur.size(), 48);
+            for (std::size_t i = 0; i < limit; ++i) {
+                if (cur[i] == '{') {
+                    ++depth;
+                } else if (cur[i] == '}') {
                     if (--depth == 0) {
                         closePos = i;
                         break;
@@ -1498,6 +1516,104 @@ namespace FallUIIcons
         return anyNonZero;
     }
 
+    std::uint32_t AdjustColorBrightnessSaturation(
+        std::uint32_t a_rgb,
+        int a_brightnessPct,
+        int a_saturationPct) noexcept
+    {
+        const std::uint32_t base = a_rgb & 0x00FFFFFFu;
+        if (a_brightnessPct == 100 && a_saturationPct == 100) {
+            return base;
+        }
+        const float briMul = static_cast<float>(std::clamp(a_brightnessPct, 10, 200)) / 100.0f;
+        const float satMul = static_cast<float>(std::clamp(a_saturationPct, 0, 200)) / 100.0f;
+
+        const float r = static_cast<float>((base >> 16) & 0xFFu) / 255.0f;
+        const float g = static_cast<float>((base >> 8) & 0xFFu) / 255.0f;
+        const float b = static_cast<float>(base & 0xFFu) / 255.0f;
+
+        const float mx = std::max({ r, g, b });
+        const float mn = std::min({ r, g, b });
+        const float d = mx - mn;
+
+        float h = 0.0f;
+        if (d > 1e-6f) {
+            if (mx == r) {
+                h = std::fmod((g - b) / d, 6.0f);
+                if (h < 0.0f) {
+                    h += 6.0f;
+                }
+            } else if (mx == g) {
+                h = (b - r) / d + 2.0f;
+            } else {
+                h = (r - g) / d + 4.0f;
+            }
+        }
+        float s = (mx > 1e-6f) ? (d / mx) : 0.0f;
+        float v = mx;
+
+        s = std::clamp(s * satMul, 0.0f, 1.0f);
+        v = std::clamp(v * briMul, 0.0f, 1.0f);
+
+        const float c = v * s;
+        const float x = c * (1.0f - std::fabs(std::fmod(h, 2.0f) - 1.0f));
+        const float m = v - c;
+        float rr = 0.0f;
+        float gg = 0.0f;
+        float bb = 0.0f;
+        if (h < 1.0f) {
+            rr = c; gg = x; bb = 0.0f;
+        } else if (h < 2.0f) {
+            rr = x; gg = c; bb = 0.0f;
+        } else if (h < 3.0f) {
+            rr = 0.0f; gg = c; bb = x;
+        } else if (h < 4.0f) {
+            rr = 0.0f; gg = x; bb = c;
+        } else if (h < 5.0f) {
+            rr = x; gg = 0.0f; bb = c;
+        } else {
+            rr = c; gg = 0.0f; bb = x;
+        }
+
+        const auto outR = static_cast<std::uint32_t>(std::clamp(std::lround((rr + m) * 255.0f), 0l, 255l));
+        const auto outG = static_cast<std::uint32_t>(std::clamp(std::lround((gg + m) * 255.0f), 0l, 255l));
+        const auto outB = static_cast<std::uint32_t>(std::clamp(std::lround((bb + m) * 255.0f), 0l, 255l));
+        return (outR << 16) | (outG << 8) | outB;
+    }
+
+    void ApplyIconRadialShading(
+        std::vector<std::uint8_t>& a_rgba,
+        int a_tileSize) noexcept
+    {
+        if (a_tileSize <= 0) {
+            return;
+        }
+        const std::size_t expected = static_cast<std::size_t>(a_tileSize) * static_cast<std::size_t>(a_tileSize) * 4u;
+        if (a_rgba.size() != expected) {
+            return;
+        }
+
+        // Matches FallUI_IconLib.swf DefineShape3 radial gradient stops [(0, 255), (255, 170)]
+        const float half = static_cast<float>(a_tileSize) * 0.5f;
+        static constexpr float kEdgeDrop = 85.0f / 255.0f;
+        for (int py = 0; py < a_tileSize; ++py) {
+            const float ny = (static_cast<float>(py) + 0.5f - half) / half;
+            for (int px = 0; px < a_tileSize; ++px) {
+                const std::size_t idx = (static_cast<std::size_t>(py) * static_cast<std::size_t>(a_tileSize) +
+                                         static_cast<std::size_t>(px)) * 4u;
+                if (a_rgba[idx + 3] == 0u) {
+                    continue;
+                }
+                const float nx = (static_cast<float>(px) + 0.5f - half) / half;
+                const float r = std::clamp(std::hypot(nx, ny), 0.0f, 1.0f);
+                const float shade = 1.0f - r * kEdgeDrop;
+                a_rgba[idx + 0] = static_cast<std::uint8_t>(std::clamp(static_cast<int>(std::lround(static_cast<float>(a_rgba[idx + 0]) * shade)), 0, 255));
+                a_rgba[idx + 1] = static_cast<std::uint8_t>(std::clamp(static_cast<int>(std::lround(static_cast<float>(a_rgba[idx + 1]) * shade)), 0, 255));
+                a_rgba[idx + 2] = static_cast<std::uint8_t>(std::clamp(static_cast<int>(std::lround(static_cast<float>(a_rgba[idx + 2]) * shade)), 0, 255));
+            }
+        }
+    }
+
     void FallUIIconRegistry::Clear()
     {
         std::lock_guard lock{ _mutex };
@@ -1507,7 +1623,11 @@ namespace FallUIIcons
         _indexedBySection.clear();
         _indexedGlobal.clear();
         _autoRules.clear();
+        _autoWildcards.clear();
         _swfCache.clear();
+        _loadedAddons.clear();
+        _activeColorSet = "Default.xml";
+        _iconsEffectEnabled = true;
         _colorCount = 0;
     }
 
@@ -1541,6 +1661,24 @@ namespace FallUIIcons
         return count;
     }
 
+    std::vector<std::string> FallUIIconRegistry::LoadedAddonNames() const
+    {
+        std::lock_guard lock{ _mutex };
+        return _loadedAddons;
+    }
+
+    std::string FallUIIconRegistry::ActiveColorSetName() const
+    {
+        std::lock_guard lock{ _mutex };
+        return _activeColorSet;
+    }
+
+    bool FallUIIconRegistry::IconsEffectEnabled() const noexcept
+    {
+        std::lock_guard lock{ _mutex };
+        return _iconsEffectEnabled;
+    }
+
     bool FallUIIconRegistry::ResolveColorName(
         const std::unordered_map<std::string, ColorDefinition>& a_colors,
         std::string_view a_colorName,
@@ -1568,6 +1706,12 @@ namespace FallUIIcons
                         a_outRgb = it->second.rgb;
                         return true;
                     }
+                } else if (token == "white") {
+                    a_outRgb = 0xFFFFFFu;
+                    return true;
+                } else if (token == "black") {
+                    a_outRgb = 0x000000u;
+                    return true;
                 } else if (TryParseHexRgb(token, a_outRgb)) {
                     return true;
                 }
@@ -1639,7 +1783,7 @@ namespace FallUIIcons
         }
     }
 
-    void FallUIIconRegistry::ParseTagXml(
+    std::size_t FallUIIconRegistry::ParseTagXml(
         const std::string& a_rawXml,
         const std::string& a_defaultSwfRelPath,
         bool a_verifySwfOnDisk,
@@ -1650,6 +1794,7 @@ namespace FallUIIcons
 
         std::unordered_map<std::string, std::string> attrs;
         std::string currentSwf = NormalizeSlashStr(a_defaultSwfRelPath);
+        std::size_t acceptedTags = 0;
         std::unordered_map<std::string, bool> swfExistsCache;
         auto doesSwfExist = [&](const std::string& a_rel) -> bool {
             if (!a_verifySwfOnDisk || _interfaceDir.empty()) {
@@ -1724,15 +1869,34 @@ namespace FallUIIcons
             SwfCandidate cand;
             cand.swfRelPath = currentSwf;
             cand.iconSymbol = iconSym;
+            if (const auto subIt = attrs.find("subicon"); subIt != attrs.end()) {
+                cand.subIconSymbol = NormalizeSymbolKey(subIt->second);
+            }
             if (const auto colIt = attrs.find("colorname"); colIt != attrs.end()) {
-                cand.hasColor = ResolveColorName(a_ioColors, colIt->second, cand.rgbColor);
+                const std::string_view rawColor = colIt->second;
+                if (cand.subIconSymbol.empty()) {
+                    cand.hasColor = ResolveColorName(a_ioColors, rawColor, cand.rgbColor);
+                } else {
+                    const auto commaPos = rawColor.find(',');
+                    const std::string primaryTok = TrimSv(
+                        commaPos == std::string_view::npos ? rawColor : rawColor.substr(0, commaPos));
+                    if (!primaryTok.empty()) {
+                        cand.hasColor = ResolveColorName(a_ioColors, primaryTok, cand.rgbColor);
+                    }
+                    if (commaPos != std::string_view::npos) {
+                        const std::string subTok = TrimSv(rawColor.substr(commaPos + 1));
+                        if (!subTok.empty()) {
+                            cand.hasSubColor = ResolveColorName(a_ioColors, subTok, cand.subRgbColor);
+                        }
+                    }
+                }
             }
 
+            if (a_verifySwfOnDisk && !doesSwfExist(cand.swfRelPath)) {
+                continue; // Do not accept/clobber when addon SWF is missing/archived
+            }
             const auto existingIt = _tags.find(kwKey);
             if (existingIt != _tags.end()) {
-                if (!doesSwfExist(cand.swfRelPath)) {
-                    continue; // Do not clobber an existing tag when addon SWF is missing/archived
-                }
                 existingIt->second.fallback = std::move(existingIt->second.primary);
                 existingIt->second.hasFallback = true;
                 existingIt->second.primary = std::move(cand);
@@ -1741,7 +1905,9 @@ namespace FallUIIcons
                 def.primary = std::move(cand);
                 _tags[kwKey] = std::move(def);
             }
+            ++acceptedTags;
         }
+        return acceptedTags;
     }
 
     void FallUIIconRegistry::ParseIndexedTagsFile(const std::filesystem::path& a_path)
@@ -1822,7 +1988,7 @@ namespace FallUIIcons
             const std::string tagKw = ToLowerAscii(StripBracketWrapper(std::string_view(trimmed).substr(eq + 1)));
             if (!needle.empty() && !tagKw.empty()) {
                 if (needle == "*") {
-                    _autoWildcards[currentSection] = tagKw;
+                    _autoWildcards.try_emplace(currentSection, tagKw);
                 } else {
                     _autoRules[currentSection].push_back({ needle, tagKw });
                 }
@@ -1841,18 +2007,130 @@ namespace FallUIIcons
         _autoRules.clear();
         _autoWildcards.clear();
         _swfCache.clear();
+        _loadedAddons.clear();
+        _activeColorSet = "Default.xml";
         _colorCount = 0;
+
+        auto readIniValues = [&](const std::filesystem::path& a_iniPath) {
+            std::unordered_map<std::string, std::string> kv;
+            std::string iniText;
+            if (!ReadWholeFileText(a_iniPath, 256u * 1024u, iniText)) {
+                return kv;
+            }
+            std::istringstream iss(iniText);
+            std::string line;
+            while (std::getline(iss, line)) {
+                if (!line.empty() && line.back() == '\r') {
+                    line.pop_back();
+                }
+                const std::string trimmed = TrimSv(line);
+                if (trimmed.empty() || trimmed.front() == ';' || trimmed.front() == '#' || trimmed.front() == '[') {
+                    continue;
+                }
+                const auto eq = trimmed.find('=');
+                if (eq == std::string::npos) {
+                    continue;
+                }
+                std::string k = ToLowerAscii(TrimSv(std::string_view(trimmed).substr(0, eq)));
+                std::string v = TrimSv(std::string_view(trimmed).substr(eq + 1));
+                if (v.size() >= 2 && ((v.front() == '"' && v.back() == '"') || (v.front() == '\'' && v.back() == '\''))) {
+                    v = TrimSv(std::string_view(v).substr(1, v.size() - 2));
+                }
+                if (!k.empty()) {
+                    kv[std::move(k)] = std::move(v);
+                }
+            }
+            return kv;
+        };
+
+        std::error_code mcmEc;
+        std::filesystem::path mcmSettingsDir = a_interfaceDir.parent_path() / "MCM" / "Settings";
+        if (!std::filesystem::exists(mcmSettingsDir, mcmEc) || !std::filesystem::is_directory(mcmSettingsDir, mcmEc)) {
+            const auto altDir = a_interfaceDir / "MCM" / "Settings";
+            if (std::filesystem::exists(altDir, mcmEc) && std::filesystem::is_directory(altDir, mcmEc)) {
+                mcmSettingsDir = altDir;
+            }
+        }
+
+        const auto iconLibIni = readIniValues(mcmSettingsDir / "FallUIIconLibrary.ini");
+        const auto falluiIni = readIniValues(mcmSettingsDir / "FallUI.ini");
+
+        std::string colorSetFile;
+        if (const auto it = iconLibIni.find("siconscolorset"); it != iconLibIni.end()) {
+            const auto fn = PathToUtf8(std::filesystem::path(it->second).filename());
+            if (!fn.empty() && ToLowerAscii(fn) != "none" && ToLowerAscii(fn) != "default.xml") {
+                colorSetFile = fn;
+            }
+        }
+        auto parseIniBool = [](const std::unordered_map<std::string, std::string>& a_kv,
+                               const std::string& a_key,
+                               bool a_default) -> bool {
+            const auto it = a_kv.find(a_key);
+            if (it == a_kv.end() || it->second.empty()) {
+                return a_default;
+            }
+            const std::string val = ToLowerAscii(TrimSv(it->second));
+            if (val == "0" || val == "false" || val == "no" || val == "off") {
+                return false;
+            }
+            if (val == "1" || val == "true" || val == "yes" || val == "on") {
+                return true;
+            }
+            return a_default;
+        };
+        const bool iconsColored = parseIniBool(iconLibIni, "biconscolored", true);
+        _iconsEffectEnabled = parseIniBool(iconLibIni, "biconseffect", true);
+
+        int brightnessPct = 100;
+        if (const auto it = iconLibIni.find("iiconsbrightness"); it != iconLibIni.end()) {
+            try {
+                brightnessPct = std::clamp(std::stoi(it->second), 10, 200);
+            } catch (...) {
+                brightnessPct = 100;
+            }
+        }
+        int saturationPct = 100;
+        if (const auto it = iconLibIni.find("iiconssaturation"); it != iconLibIni.end()) {
+            try {
+                saturationPct = std::clamp(std::stoi(it->second), 0, 200);
+            } catch (...) {
+                saturationPct = 100;
+            }
+        }
+
+        std::string tagConfigFile = "FIS (FallUI Item Sorter).xml";
+        if (const auto it = falluiIni.find("sitemsortertagconfig"); it != falluiIni.end()) {
+            const auto fn = PathToUtf8(std::filesystem::path(it->second).filename());
+            const std::string fnLower = ToLowerAscii(fn);
+            if (!fn.empty() && fnLower != "none" && fnLower != "auto-detect.xml") {
+                std::error_code cfgEc;
+                const auto candidatePath = a_interfaceDir / "ItemSorter" / fn;
+                if (std::filesystem::exists(candidatePath, cfgEc) && std::filesystem::is_regular_file(candidatePath, cfgEc)) {
+                    tagConfigFile = fn;
+                }
+            }
+        }
 
         std::unordered_map<std::string, ColorDefinition> colors;
         std::string xmlBuf;
 
-        // 1. Default color palette
-        if (ReadWholeFileText(a_interfaceDir / "ItemSorter" / "ColorSets" / "Default.xml", kMaxXmlFileBytes, xmlBuf)) {
-            ParseColorXml(StripCommentsXml(xmlBuf), colors);
+        // 1. Match FallUI Inventory TagConfiguration.loadTagConfig 1:1:
+        // Load ONLY the selected ColorSet XML (without preloading Default.xml when a custom ColorSet is active)
+        if (iconsColored) {
+            std::string colorSetXmlBuf;
+            if (!colorSetFile.empty() &&
+                ReadWholeFileText(a_interfaceDir / "ItemSorter" / "ColorSets" / colorSetFile, kMaxXmlFileBytes, colorSetXmlBuf)) {
+                ParseColorXml(StripCommentsXml(colorSetXmlBuf), colors);
+                _activeColorSet = colorSetFile;
+            } else if (ReadWholeFileText(a_interfaceDir / "ItemSorter" / "ColorSets" / "Default.xml", kMaxXmlFileBytes, xmlBuf)) {
+                ParseColorXml(StripCommentsXml(xmlBuf), colors);
+            }
+        } else if (!colorSetFile.empty()) {
+            _activeColorSet = colorSetFile;
         }
 
         // 2. Primary FIS tag configuration
-        if (ReadWholeFileText(a_interfaceDir / "ItemSorter" / "FIS (FallUI Item Sorter).xml", kMaxXmlFileBytes, xmlBuf)) {
+        if (ReadWholeFileText(a_interfaceDir / "ItemSorter" / tagConfigFile, kMaxXmlFileBytes, xmlBuf)) {
             ParseTagXml(xmlBuf, "FallUI_IconLib.swf", false, colors);
         }
 
@@ -1877,16 +2155,85 @@ namespace FallUIIcons
             std::sort(addonFiles.begin(), addonFiles.end());
             for (const auto& xmlPath : addonFiles) {
                 if (ReadWholeFileText(xmlPath, kMaxXmlFileBytes, xmlBuf)) {
-                    ParseTagXml(xmlBuf, "FallUI_IconLib.swf", true, colors);
+                    if (ParseTagXml(xmlBuf, "FallUI_IconLib.swf", true, colors) > 0) {
+                        const std::string addonStem = PathToUtf8(xmlPath.stem());
+                        if (!addonStem.empty()) {
+                            _loadedAddons.push_back(addonStem);
+                        }
+                    }
                 }
             }
         }
 
-        _colorCount = colors.size();
+        if (!iconsColored) {
+            for (auto& [k, def] : _tags) {
+                def.primary.hasColor = false;
+                def.primary.rgbColor = 0xFFFFFFu;
+                def.primary.hasSubColor = false;
+                def.primary.subRgbColor = 0xFFFFFFu;
+                if (def.hasFallback) {
+                    def.fallback.hasColor = false;
+                    def.fallback.rgbColor = 0xFFFFFFu;
+                    def.fallback.hasSubColor = false;
+                    def.fallback.subRgbColor = 0xFFFFFFu;
+                }
+            }
+        } else if (brightnessPct != 100 || saturationPct != 100) {
+            for (auto& [k, def] : _tags) {
+                if (def.primary.hasColor) {
+                    def.primary.rgbColor = AdjustColorBrightnessSaturation(def.primary.rgbColor, brightnessPct, saturationPct);
+                }
+                if (def.primary.hasSubColor) {
+                    def.primary.subRgbColor = AdjustColorBrightnessSaturation(def.primary.subRgbColor, brightnessPct, saturationPct);
+                }
+                if (def.hasFallback) {
+                    if (def.fallback.hasColor) {
+                        def.fallback.rgbColor = AdjustColorBrightnessSaturation(def.fallback.rgbColor, brightnessPct, saturationPct);
+                    }
+                    if (def.fallback.hasSubColor) {
+                        def.fallback.subRgbColor = AdjustColorBrightnessSaturation(def.fallback.subRgbColor, brightnessPct, saturationPct);
+                    }
+                }
+            }
+        }
 
-        // 4. IndexedTags & AutoTags fallback matching dictionaries
-        ParseIndexedTagsFile(a_interfaceDir / "ItemSorter" / "FIS" / "AutoTags" / "IndexedTags_en.txt");
-        ParseAutoTagsIni(a_interfaceDir / "ItemSorter" / "FIS" / "AutoTags" / "AutoTags_en.ini");
+        _colorCount = iconsColored ? colors.size() : 0;
+
+        // 4. IndexedTags & AutoTags fallback matching dictionaries (_en first, then any extra locale files)
+        {
+            const std::filesystem::path autoTagsDir = a_interfaceDir / "ItemSorter" / "FIS" / "AutoTags";
+            ParseIndexedTagsFile(autoTagsDir / "IndexedTags_en.txt");
+            ParseAutoTagsIni(autoTagsDir / "AutoTags_en.ini");
+
+            std::error_code ec;
+            if (std::filesystem::exists(autoTagsDir, ec) && std::filesystem::is_directory(autoTagsDir, ec)) {
+                std::vector<std::filesystem::path> indexedExtras;
+                std::vector<std::filesystem::path> autoExtras;
+                std::filesystem::directory_iterator it(autoTagsDir, ec);
+                for (; !ec && it != std::filesystem::directory_iterator(); it.increment(ec)) {
+                    std::error_code entryEc;
+                    if (!it->is_regular_file(entryEc) || entryEc) {
+                        continue;
+                    }
+                    const std::string fnameLower = ToLowerAscii(PathToUtf8(it->path().filename()));
+                    if (fnameLower.starts_with("indexedtags_") && fnameLower.ends_with(".txt") &&
+                        fnameLower != "indexedtags_en.txt") {
+                        indexedExtras.push_back(it->path());
+                    } else if (fnameLower.starts_with("autotags_") && fnameLower.ends_with(".ini") &&
+                               fnameLower != "autotags_en.ini") {
+                        autoExtras.push_back(it->path());
+                    }
+                }
+                std::sort(indexedExtras.begin(), indexedExtras.end());
+                std::sort(autoExtras.begin(), autoExtras.end());
+                for (const auto& p : indexedExtras) {
+                    ParseIndexedTagsFile(p);
+                }
+                for (const auto& p : autoExtras) {
+                    ParseAutoTagsIni(p);
+                }
+            }
+        }
 
         return !_tags.empty();
     }
@@ -1926,6 +2273,9 @@ namespace FallUIIcons
             a_out.symbolName = it->second.primary.iconSymbol;
             a_out.rgbColor = it->second.primary.rgbColor;
             a_out.hasColor = it->second.primary.hasColor;
+            a_out.subSymbolName = it->second.primary.subIconSymbol;
+            a_out.subRgbColor = it->second.primary.subRgbColor;
+            a_out.hasSubColor = it->second.primary.hasSubColor;
             if (it->second.hasFallback &&
                 !it->second.fallback.iconSymbol.empty() &&
                 !it->second.fallback.swfRelPath.empty()) {
@@ -1934,8 +2284,14 @@ namespace FallUIIcons
                 a_out.fallbackSymbolName = it->second.fallback.iconSymbol;
                 a_out.fallbackRgbColor = it->second.fallback.rgbColor;
                 a_out.fallbackHasColor = it->second.fallback.hasColor;
+                a_out.fallbackSubSymbolName = it->second.fallback.subIconSymbol;
+                a_out.fallbackSubRgbColor = it->second.fallback.subRgbColor;
+                a_out.fallbackHasSubColor = it->second.fallback.hasSubColor;
             } else {
                 a_out.hasFallback = false;
+                a_out.fallbackSubSymbolName.clear();
+                a_out.fallbackSubRgbColor = 0xFFFFFFu;
+                a_out.fallbackHasSubColor = false;
             }
             return true;
         };
@@ -2054,17 +2410,22 @@ namespace FallUIIcons
         const ResolvedFallUIIcon& a_resolved,
         int a_tileSize,
         std::vector<std::uint8_t>& a_outRgba,
-        bool* a_outUsedFallback)
+        bool* a_outUsedFallback,
+        bool a_bakeSubColors,
+        bool* a_outColorsBaked)
     {
         if (a_outUsedFallback) {
             *a_outUsedFallback = false;
+        }
+        if (a_outColorsBaked) {
+            *a_outColorsBaked = false;
         }
         if (a_resolved.swfRelPath.empty() || a_resolved.symbolName.empty()) {
             return false;
         }
 
         std::lock_guard lock{ _mutex };
-        auto rasterizeOne = [&](std::string_view a_relPath, std::string_view a_sym) -> bool {
+        auto rasterizeOne = [&](std::string_view a_relPath, std::string_view a_sym, int a_size, std::vector<std::uint8_t>& a_dst) -> bool {
             if (a_relPath.empty() || a_sym.empty()) {
                 return false;
             }
@@ -2082,15 +2443,155 @@ namespace FallUIIcons
             if (!entry.valid) {
                 return false;
             }
-            return entry.swf.RasterizeSymbol(a_sym, a_tileSize, a_outRgba);
+            if (!entry.swf.RasterizeSymbol(a_sym, a_size, a_dst)) {
+                return false;
+            }
+            if (_iconsEffectEnabled) {
+                ApplyIconRadialShading(a_dst, a_size);
+            }
+            return true;
         };
 
-        if (rasterizeOne(a_resolved.swfRelPath, a_resolved.symbolName)) {
+        auto compositeSubicon = [&](
+            std::string_view a_relPath,
+            std::string_view a_subSym,
+            std::uint32_t a_mainRgb,
+            bool a_hasMainColor,
+            std::uint32_t a_subRgb,
+            bool a_hasSubColor) -> bool
+        {
+            if (a_subSym.empty() || a_tileSize < 8) {
+                return false;
+            }
+            const int subSize = std::clamp((a_tileSize * 9) / 16, 6, a_tileSize);
+            std::vector<std::uint8_t> subRgba;
+            bool gotSub = rasterizeOne(a_relPath, a_subSym, subSize, subRgba);
+            if (!gotSub && ToLowerAscii(NormalizeSlashStr(std::string(a_relPath))) != "fallui_iconlib.swf") {
+                gotSub = rasterizeOne("FallUI_IconLib.swf", a_subSym, subSize, subRgba);
+            }
+            if (!gotSub) {
+                return false;
+            }
+            if (subRgba.size() != static_cast<std::size_t>(subSize) * static_cast<std::size_t>(subSize) * 4u) {
+                return false;
+            }
+
+            const bool bakeColors = a_bakeSubColors && (a_hasMainColor || a_hasSubColor);
+            const std::uint32_t effMainRgb = a_hasMainColor ? a_mainRgb : 0xFFFFFFu;
+            const std::uint32_t effSubRgb = a_hasSubColor ? a_subRgb : effMainRgb;
+            const std::uint8_t mainR = static_cast<std::uint8_t>((effMainRgb >> 16) & 0xFFu);
+            const std::uint8_t mainG = static_cast<std::uint8_t>((effMainRgb >> 8) & 0xFFu);
+            const std::uint8_t mainB = static_cast<std::uint8_t>(effMainRgb & 0xFFu);
+            const std::uint8_t subR = static_cast<std::uint8_t>((effSubRgb >> 16) & 0xFFu);
+            const std::uint8_t subG = static_cast<std::uint8_t>((effSubRgb >> 8) & 0xFFu);
+            const std::uint8_t subB = static_cast<std::uint8_t>(effSubRgb & 0xFFu);
+
+            if (bakeColors) {
+                for (std::size_t i = 0; i + 3 < a_outRgba.size(); i += 4) {
+                    a_outRgba[i + 0] = static_cast<std::uint8_t>((static_cast<unsigned>(a_outRgba[i + 0]) * mainR + 127u) / 255u);
+                    a_outRgba[i + 1] = static_cast<std::uint8_t>((static_cast<unsigned>(a_outRgba[i + 1]) * mainG + 127u) / 255u);
+                    a_outRgba[i + 2] = static_cast<std::uint8_t>((static_cast<unsigned>(a_outRgba[i + 2]) * mainB + 127u) / 255u);
+                }
+            }
+
+            const int dstX0 = a_tileSize - subSize;
+            const int dstY0 = a_tileSize - subSize;
+
+            // 1. Cut a subtle 1px halo out of the main icon behind the bottom-right subicon
+            for (int y = std::max(0, dstY0 - 1); y < a_tileSize; ++y) {
+                for (int x = std::max(0, dstX0 - 1); x < a_tileSize; ++x) {
+                    std::uint8_t maxNeighborAlpha = 0;
+                    for (int dy = -1; dy <= 1; ++dy) {
+                        for (int dx = -1; dx <= 1; ++dx) {
+                            const int sx = (x + dx) - dstX0;
+                            const int sy = (y + dy) - dstY0;
+                            if (sx >= 0 && sx < subSize && sy >= 0 && sy < subSize) {
+                                const std::size_t sIdx = (static_cast<std::size_t>(sy) * static_cast<std::size_t>(subSize) +
+                                                          static_cast<std::size_t>(sx)) * 4u;
+                                maxNeighborAlpha = std::max(maxNeighborAlpha, subRgba[sIdx + 3]);
+                            }
+                        }
+                    }
+                    if (maxNeighborAlpha > 0) {
+                        const std::size_t dIdx = (static_cast<std::size_t>(y) * static_cast<std::size_t>(a_tileSize) +
+                                                  static_cast<std::size_t>(x)) * 4u;
+                        const int keepAlpha = (static_cast<int>(a_outRgba[dIdx + 3]) * (255 - static_cast<int>(maxNeighborAlpha))) / 255;
+                        a_outRgba[dIdx + 3] = static_cast<std::uint8_t>(std::clamp(keepAlpha, 0, 255));
+                    }
+                }
+            }
+
+            // 2. Alpha-composite the subicon over the bottom-right quadrant (straight alpha)
+            for (int sy = 0; sy < subSize; ++sy) {
+                const int dy = dstY0 + sy;
+                if (dy < 0 || dy >= a_tileSize) {
+                    continue;
+                }
+                for (int sx = 0; sx < subSize; ++sx) {
+                    const int dx = dstX0 + sx;
+                    if (dx < 0 || dx >= a_tileSize) {
+                        continue;
+                    }
+                    const std::size_t sIdx = (static_cast<std::size_t>(sy) * static_cast<std::size_t>(subSize) +
+                                              static_cast<std::size_t>(sx)) * 4u;
+                    const float sa = static_cast<float>(subRgba[sIdx + 3]) / 255.0f;
+                    if (sa <= 0.0f) {
+                        continue;
+                    }
+                    const std::size_t dIdx = (static_cast<std::size_t>(dy) * static_cast<std::size_t>(a_tileSize) +
+                                              static_cast<std::size_t>(dx)) * 4u;
+                    const float da = static_cast<float>(a_outRgba[dIdx + 3]) / 255.0f;
+                    const float outA = sa + da * (1.0f - sa);
+                    const float srcR = bakeColors
+                        ? (static_cast<float>(subRgba[sIdx + 0]) * (static_cast<float>(subR) / 255.0f))
+                        : static_cast<float>(subRgba[sIdx + 0]);
+                    const float srcG = bakeColors
+                        ? (static_cast<float>(subRgba[sIdx + 1]) * (static_cast<float>(subG) / 255.0f))
+                        : static_cast<float>(subRgba[sIdx + 1]);
+                    const float srcB = bakeColors
+                        ? (static_cast<float>(subRgba[sIdx + 2]) * (static_cast<float>(subB) / 255.0f))
+                        : static_cast<float>(subRgba[sIdx + 2]);
+                    if (outA > 0.0001f) {
+                        const float r = (srcR * sa + static_cast<float>(a_outRgba[dIdx + 0]) * da * (1.0f - sa)) / outA;
+                        const float g = (srcG * sa + static_cast<float>(a_outRgba[dIdx + 1]) * da * (1.0f - sa)) / outA;
+                        const float b = (srcB * sa + static_cast<float>(a_outRgba[dIdx + 2]) * da * (1.0f - sa)) / outA;
+                        a_outRgba[dIdx + 0] = static_cast<std::uint8_t>(std::clamp(static_cast<int>(std::lround(r)), 0, 255));
+                        a_outRgba[dIdx + 1] = static_cast<std::uint8_t>(std::clamp(static_cast<int>(std::lround(g)), 0, 255));
+                        a_outRgba[dIdx + 2] = static_cast<std::uint8_t>(std::clamp(static_cast<int>(std::lround(b)), 0, 255));
+                    }
+                    a_outRgba[dIdx + 3] = static_cast<std::uint8_t>(std::clamp(static_cast<int>(std::lround(outA * 255.0f)), 0, 255));
+                }
+            }
+            return bakeColors;
+        };
+
+        if (rasterizeOne(a_resolved.swfRelPath, a_resolved.symbolName, a_tileSize, a_outRgba)) {
+            const bool baked = compositeSubicon(
+                a_resolved.swfRelPath,
+                a_resolved.subSymbolName,
+                a_resolved.rgbColor,
+                a_resolved.hasColor,
+                a_resolved.subRgbColor,
+                a_resolved.hasSubColor);
+            if (a_outColorsBaked) {
+                *a_outColorsBaked = baked;
+            }
             return true;
         }
-        if (a_resolved.hasFallback && rasterizeOne(a_resolved.fallbackSwfRelPath, a_resolved.fallbackSymbolName)) {
+        if (a_resolved.hasFallback &&
+            rasterizeOne(a_resolved.fallbackSwfRelPath, a_resolved.fallbackSymbolName, a_tileSize, a_outRgba)) {
             if (a_outUsedFallback) {
                 *a_outUsedFallback = true;
+            }
+            const bool baked = compositeSubicon(
+                a_resolved.fallbackSwfRelPath,
+                a_resolved.fallbackSubSymbolName,
+                a_resolved.fallbackRgbColor,
+                a_resolved.fallbackHasColor,
+                a_resolved.fallbackSubRgbColor,
+                a_resolved.fallbackHasSubColor);
+            if (a_outColorsBaked) {
+                *a_outColorsBaked = baked;
             }
             return true;
         }

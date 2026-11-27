@@ -103,26 +103,125 @@ namespace AnchorManager
         return a_refPosition;
     }
 
+    Vector3 SelectSafeDoorAnchorPosition(
+        const Vector3& a_refPosition,
+        bool a_hasDoorBounds,
+        const Vector3& a_doorBoundCenter,
+        float a_doorMinZ,
+        float a_doorMaxZ,
+        bool a_hasNamedNode,
+        const Vector3& a_namedNodePos) noexcept
+    {
+        auto isFiniteVec = [](const Vector3& v) noexcept {
+            return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
+        };
+        const bool doorValid =
+            a_hasDoorBounds &&
+            isFiniteVec(a_doorBoundCenter) &&
+            std::isfinite(a_doorMinZ) &&
+            std::isfinite(a_doorMaxZ);
+        const Vector3 fallback = doorValid
+            ? a_doorBoundCenter
+            : (isFiniteVec(a_refPosition) ? a_refPosition : Vector3{});
+
+        if (!a_hasNamedNode || !isFiniteVec(a_namedNodePos)) {
+            return fallback;
+        }
+
+        if (doorValid) {
+            const float doorHeight = a_doorMaxZ - a_doorMinZ;
+            if (doorHeight > 40.0f) {
+                if (a_namedNodePos.z < a_doorMinZ + doorHeight * 0.18f) {
+                    return fallback;
+                }
+                if (a_namedNodePos.z > a_doorMaxZ + 20.0f) {
+                    return fallback;
+                }
+            }
+            if (isFiniteVec(a_refPosition)) {
+                const float distFromRef = std::hypot(
+                    a_namedNodePos.x - a_refPosition.x,
+                    a_namedNodePos.y - a_refPosition.y,
+                    a_namedNodePos.z - a_refPosition.z);
+                if (distFromRef < 4.0f && a_doorBoundCenter.z > a_refPosition.z + 25.0f) {
+                    return fallback;
+                }
+            }
+            const float distFromCenter = std::hypot(
+                a_namedNodePos.x - a_doorBoundCenter.x,
+                a_namedNodePos.y - a_doorBoundCenter.y,
+                a_namedNodePos.z - a_doorBoundCenter.z);
+            const float maxAllowed = std::max(150.0f, doorHeight * 1.2f);
+            if (!std::isfinite(distFromCenter) || distFromCenter > maxAllowed) {
+                return fallback;
+            }
+        }
+
+        return a_namedNodePos;
+    }
+
     bool IsDoorAnchorNodeName(std::string_view a_name)
     {
         if (a_name.empty()) {
             return false;
         }
 
-        const std::string lower = ToLowerASCII(a_name);
-        static constexpr std::array<std::string_view, 4> kKeywords{
+        static constexpr std::array<std::string_view, 12> kDoorTokens{
             "handle",
-            "lock",
             "knob",
-            "latch"
+            "latch",
+            "lock",
+            "padlock",
+            "deadlock",
+            "deadbolt",
+            "bolt",
+            "keyhole",
+            "doorhandle",
+            "doorlock",
+            "doorknob"
         };
 
-        for (const auto kw : kKeywords) {
-            if (lower.find(kw) != std::string::npos) {
-                return true;
+        auto matchToken = [](std::string_view a_tok) noexcept {
+            for (const auto kw : kDoorTokens) {
+                if (a_tok == kw) {
+                    return true;
+                }
             }
+            return false;
+        };
+
+        std::string token;
+        token.reserve(a_name.size());
+        for (std::size_t i = 0; i < a_name.size(); ++i) {
+            const unsigned char ch = static_cast<unsigned char>(a_name[i]);
+            if (!std::isalpha(ch)) {
+                if (!token.empty()) {
+                    if (matchToken(token)) {
+                        return true;
+                    }
+                    token.clear();
+                }
+                continue;
+            }
+
+            if (!token.empty() && std::isupper(ch)) {
+                const unsigned char prev = static_cast<unsigned char>(a_name[i - 1]);
+                const bool prevLower = std::islower(prev) != 0;
+                const bool acronymEnd =
+                    (std::isupper(prev) != 0) &&
+                    (i + 1 < a_name.size()) &&
+                    (std::islower(static_cast<unsigned char>(a_name[i + 1])) != 0);
+                if (prevLower || acronymEnd) {
+                    if (matchToken(token)) {
+                        return true;
+                    }
+                    token.clear();
+                }
+            }
+            token.push_back(static_cast<char>(std::tolower(ch)));
         }
-        return false;
+
+        return !token.empty() && matchToken(token);
     }
 
     bool IsFurnitureMarkerNodeName(std::string_view a_name)
@@ -406,7 +505,11 @@ namespace AnchorManager
             }
         }
 
-        [[nodiscard]] bool ComputeVisibleGeometryBoundCenter(RE::NiAVObject* a_root, Vector3& a_outCenter)
+        [[nodiscard]] bool ComputeVisibleGeometryBounds(
+            RE::NiAVObject* a_root,
+            Vector3& a_outCenter,
+            float& a_outMinZ,
+            float& a_outMaxZ)
         {
             if (!a_root) {
                 return false;
@@ -425,7 +528,16 @@ namespace AnchorManager
                 0.5f * (chosen.minY + chosen.maxY),
                 0.5f * (chosen.minZ + chosen.maxZ)
             };
+            a_outMinZ = chosen.minZ;
+            a_outMaxZ = chosen.maxZ;
             return true;
+        }
+
+        [[nodiscard]] bool ComputeVisibleGeometryBoundCenter(RE::NiAVObject* a_root, Vector3& a_outCenter)
+        {
+            float minZ = 0.0f;
+            float maxZ = 0.0f;
+            return ComputeVisibleGeometryBounds(a_root, a_outCenter, minZ, maxZ);
         }
 
         [[nodiscard]] bool IsTargetedSubtreeVisibleNonMarker(
@@ -606,6 +718,80 @@ namespace AnchorManager
         const bool isActivator = (base && base->GetFormType() == RE::ENUM_FORM_ID::kACTI);
         const bool isContainer = (input.category == TargetCategory::kContainer);
 
+        if (input.category == TargetCategory::kDoor) {
+            Vector3 doorCenter{};
+            float doorMinZ = 0.0f;
+            float doorMaxZ = 0.0f;
+            bool hasDoorBounds = false;
+            if (refRoot3D && ComputeVisibleGeometryBounds(refRoot3D, doorCenter, doorMinZ, doorMaxZ)) {
+                hasDoorBounds = true;
+            } else if (IsTargetedSubtreeVisibleNonMarker(a_targeted3D, refRoot3D) &&
+                       ComputeVisibleGeometryBounds(a_targeted3D, doorCenter, doorMinZ, doorMaxZ)) {
+                hasDoorBounds = true;
+            } else if (root3D && root3D->worldBound.fRadius > 0.001f) {
+                doorCenter = {
+                    root3D->worldBound.center.x,
+                    root3D->worldBound.center.y,
+                    root3D->worldBound.center.z
+                };
+                doorMinZ = doorCenter.z - root3D->worldBound.fRadius;
+                doorMaxZ = doorCenter.z + root3D->worldBound.fRadius;
+                hasDoorBounds = true;
+            }
+
+            RE::NiAVObject* namedNode = FindDoorAnchorFromTargetedSubtree(a_targeted3D, root3D);
+            if (!namedNode && root3D) {
+                namedNode = FindDoorAnchorNodeRecursive(root3D);
+            }
+
+            bool hasNamedPos = false;
+            Vector3 namedPos{};
+            if (namedNode) {
+                if (namedNode->IsGeometry() != nullptr && namedNode->worldBound.fRadius > 0.001f) {
+                    namedPos = {
+                        namedNode->worldBound.center.x,
+                        namedNode->worldBound.center.y,
+                        namedNode->worldBound.center.z
+                    };
+                    hasNamedPos = true;
+                } else {
+                    const Vector3 txPos{
+                        namedNode->world.translate.x,
+                        namedNode->world.translate.y,
+                        namedNode->world.translate.z
+                    };
+                    const float distToRef = std::hypot(
+                        txPos.x - input.refPosition.x,
+                        txPos.y - input.refPosition.y,
+                        txPos.z - input.refPosition.z);
+                    Vector3 subCenter{};
+                    if (distToRef < 4.0f && ComputeVisibleGeometryBoundCenter(namedNode, subCenter)) {
+                        namedPos = subCenter;
+                    } else {
+                        namedPos = txPos;
+                    }
+                    hasNamedPos = true;
+                }
+            }
+
+            input.boundCenter = SelectSafeDoorAnchorPosition(
+                input.refPosition,
+                hasDoorBounds,
+                doorCenter,
+                doorMinZ,
+                doorMaxZ,
+                hasNamedPos,
+                namedPos);
+            input.hasBoundCenter = true;
+            input.hasNamedNode = false;
+            if (a_outUsedGeometry) {
+                *a_outUsedGeometry = hasDoorBounds;
+            }
+
+            const Vector3 finalPos = ComputeAnchorPosition(input, a_config);
+            return RE::NiPoint3{ finalPos.x, finalPos.y, finalPos.z };
+        }
+
         if (isTerminalOrFurniture || isActivator || isContainer) {
             Vector3 geomCenter{};
             if (refRoot3D && ComputeVisibleGeometryBoundCenter(refRoot3D, geomCenter)) {
@@ -679,12 +865,7 @@ namespace AnchorManager
         }
 
         RE::NiAVObject* namedNode = nullptr;
-        if (input.category == TargetCategory::kDoor) {
-            namedNode = FindDoorAnchorFromTargetedSubtree(a_targeted3D, root3D);
-            if (!namedNode && root3D) {
-                namedNode = FindDoorAnchorNodeRecursive(root3D);
-            }
-        } else if (input.category == TargetCategory::kActor && root3D) {
+        if (input.category == TargetCategory::kActor && root3D) {
             namedNode = FindActorAnchorNode(root3D);
         }
 

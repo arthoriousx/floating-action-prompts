@@ -1,6 +1,6 @@
 {
   "name": "floating-action-prompts",
-  "version-string": "1.2.0",
+  "version-string": "2.0.0",
   "dependencies": [
     "boost-stl-interfaces",
     "fmt",

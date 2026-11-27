@@ -39,6 +39,14 @@ namespace AnchorManager
         bool a_hasTargetedCenter,
         const Vector3& a_targetedCenter,
         float a_maxDeviation = 40.0f) noexcept;
+    [[nodiscard]] Vector3 SelectSafeDoorAnchorPosition(
+        const Vector3& a_refPosition,
+        bool a_hasDoorBounds,
+        const Vector3& a_doorBoundCenter,
+        float a_doorMinZ,
+        float a_doorMaxZ,
+        bool a_hasNamedNode,
+        const Vector3& a_namedNodePos) noexcept;
     [[nodiscard]] bool IsDoorAnchorNodeName(std::string_view a_name);
     [[nodiscard]] bool IsFurnitureMarkerNodeName(std::string_view a_name);
     [[nodiscard]] bool IsTransientEffectNodeName(std::string_view a_name);

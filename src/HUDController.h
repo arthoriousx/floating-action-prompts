@@ -88,6 +88,126 @@ namespace HUDController
 
     [[nodiscard]] bool IsHealActionVerb(std::string_view a_verb) noexcept;
     [[nodiscard]] bool IsCrimeActionVerb(std::string_view a_verb) noexcept;
+    [[nodiscard]] bool IsRangedNpcActionVerb(std::string_view a_verb) noexcept;
+    [[nodiscard]] bool IsCloseRangeNpcActionVerb(std::string_view a_verb) noexcept;
+    [[nodiscard]] bool ShouldSuppressForAiming(
+        int a_aimingMode,
+        bool a_isAiming,
+        bool a_isNpcTarget,
+        bool a_isQuickContainer) noexcept;
+
+    [[nodiscard]] bool IsAimingWithCooldown(
+        bool a_rawAiming,
+        std::int64_t a_nowMs,
+        std::int64_t& a_lastAimingMs,
+        std::int64_t a_cooldownMs = 280) noexcept;
+
+    [[nodiscard]] Vector3 ComputeWaterPromptAnchor(
+        const Vector3& a_playerPos,
+        float a_playerYawRad,
+        const Vector3& a_camPos,
+        const Vector3& a_camForward,
+        float a_waterZ,
+        float a_maxHorizDist = 105.0f) noexcept;
+
+    struct FeaturedExamineInput
+    {
+        bool isFeaturedExamineOpen{ false };
+        bool isDismissEvent{ false };
+        bool isPressed{ false };
+        bool isReleased{ false };
+        bool isJustPressed{ false };
+        std::int64_t openTimeMs{ 0 };
+        std::int64_t nowMs{ 0 };
+        std::int64_t graceMs{ 600 };
+    };
+
+    [[nodiscard]] bool StepFeaturedExamineGuard(
+        bool& a_waitInitialRelease,
+        const FeaturedExamineInput& a_in) noexcept;
+
+    struct ThirdPersonAssistCandidate
+    {
+        float dist{ 0.0f };
+        float forwardDot{ 0.0f };
+        float crosshairDot{ 0.0f };
+        bool hasCrosshairDot{ false };
+        bool isLooseItem{ false };
+        bool isCurrentAssistTarget{ false };
+    };
+
+    [[nodiscard]] float ScoreThirdPersonCandidate(
+        const ThirdPersonAssistCandidate& a_cand,
+        float a_maxDist,
+        float a_minCosHalfAngle) noexcept;
+
+    [[nodiscard]] bool ShouldThirdPersonAssistOverrideCrosshair(
+        int a_mode,
+        bool a_hasCrosshairTarget,
+        bool a_crosshairIsQuickContainer,
+        bool a_crosshairIsLooseItem,
+        float a_crosshairDist,
+        float a_assistMaxDist) noexcept;
+
+    [[nodiscard]] bool DoesActionRequireHold(
+        std::string_view a_verb,
+        bool a_isCrime,
+        TargetInfo::ItemKind a_targetKind,
+        bool a_isLoadDoor,
+        const ConfigData& a_cfg,
+        bool a_isWaterTarget = false) noexcept;
+
+    struct HoldToActivateState
+    {
+        bool active{ false };
+        bool completedWaitingRelease{ false };
+        std::uint64_t targetKey{ 0 };
+        std::int64_t startMs{ 0 };
+        std::int64_t lastSeenMs{ 0 };
+        float progress{ 0.0f };
+    };
+
+    struct HoldToActivateInput
+    {
+        bool requiresHold{ false };
+        std::uint64_t targetKey{ 0 };
+        bool isJustPressed{ false };
+        bool isPressed{ false };
+        bool isReleased{ false };
+    };
+
+    struct HoldToActivateDecision
+    {
+        bool swallowEvent{ false };
+        bool triggerNow{ false };
+        float progress{ 0.0f };
+    };
+
+    [[nodiscard]] HoldToActivateDecision StepHoldToActivate(
+        HoldToActivateState& a_state,
+        const HoldToActivateInput& a_in,
+        std::int64_t a_nowMs,
+        std::int64_t a_durationMs,
+        std::int64_t a_staleHoldTimeoutMs = 3000) noexcept;
+
+    enum class SyntheticHoldTapAction : std::uint8_t
+    {
+        kInactive = 0,
+        kPassPress,
+        kPassRelease,
+        kPassReleaseAndResetHold,
+        kSwallow,
+        kSwallowAndResetHold
+    };
+
+    [[nodiscard]] SyntheticHoldTapAction StepSyntheticHoldTap(
+        int& a_stage,
+        const void*& a_queueHead,
+        std::int64_t& a_triggerMs,
+        const void* a_curQueueHead,
+        bool a_isReleased,
+        std::int64_t a_nowMs,
+        std::int64_t a_timeoutMs = 1500) noexcept;
     [[nodiscard]] bool ShouldBlockPostLootActivate(
         std::int64_t a_nowMs,
         std::int64_t a_lastTakeMs,
@@ -108,7 +228,19 @@ namespace HUDController
         std::string key;
         std::string label;
         bool enabled{ true };
+        bool requiresHold{ false };
+        std::uint8_t holdSlot{ 0 };
+        float holdProgress{ 0.0f };
     };
+
+    [[nodiscard]] bool FilterNpcPromptActions(
+        std::vector<ButtonHintEntry>& a_actions,
+        bool a_isNonCompanionLiveNpc,
+        float a_distance,
+        bool a_limitEnabled,
+        float a_maxDistance,
+        bool a_keepRangedActions,
+        float a_rangedMaxDistance = 0.0f) noexcept;
 
     inline constexpr std::size_t kMaxExpandedInventoryItems = 512;
 
@@ -130,6 +262,8 @@ namespace HUDController
         bool isQuestItem{ false };
         bool isCaps{ false };
         bool isTemporary{ false };
+        bool hasCondition{ false };
+        float conditionPercent{ 100.0f };
     };
 
     struct QuickLootSortConfig
@@ -373,6 +507,67 @@ namespace HUDController
         std::int64_t startMs{ 0 };
     };
 
+    [[nodiscard]] bool ShouldThirdPersonAssistOverrideCrosshair(
+        int a_mode,
+        bool a_hasCrosshairTarget,
+        bool a_crosshairIsQuickContainer,
+        bool a_crosshairIsLooseItem,
+        float a_crosshairDist,
+        float a_assistMaxDist) noexcept;
+
+    [[nodiscard]] bool IsSolidWallCollisionLayer(std::uint8_t a_layer) noexcept;
+
+    [[nodiscard]] bool IsThirdPersonAssistLosClear(
+        bool a_hasHit,
+        bool a_hitTargetOrPlayer,
+        float a_hitFraction,
+        float a_rayDist,
+        float a_targetDeltaZ,
+        bool a_hitSolidWall = false,
+        bool a_allowWallRecess = false) noexcept;
+
+    [[nodiscard]] bool IsDisallowedAssistTargetNameOrVerb(
+        std::string_view a_displayName,
+        std::string_view a_verb,
+        bool a_isActivatorForm) noexcept;
+
+    [[nodiscard]] bool ShouldKeepLockedThirdPersonTarget(
+        std::uint32_t a_lockedFormId,
+        std::int64_t a_lockStartMs,
+        std::int64_t a_nowMs,
+        std::int64_t a_lockMs,
+        bool a_lockedStillValid,
+        bool a_crosshairHasTarget) noexcept;
+
+    struct PostHoldMenuGuardState
+    {
+        bool armed{ false };
+        bool menuObserved{ false };
+        bool waitRelease{ false };
+        std::int64_t triggerMs{ 0 };
+        std::int64_t menuOpenMs{ 0 };
+        std::int64_t releaseMs{ 0 };
+        std::uint32_t boundDevice{ 0xFFFFFFFFu };
+        std::uint32_t boundIdCode{ 0xFFFFFFFFu };
+    };
+
+    struct PostHoldMenuGuardInput
+    {
+        bool inMenuMode{ false };
+        bool isMatchingPhysicalKey{ false };
+        bool isConfirmFamilyEvent{ false };
+        bool isPressed{ false };
+        bool isReleased{ false };
+        bool isJustPressed{ false };
+        std::int64_t nowMs{ 0 };
+        std::int64_t armWindowMs{ 1200 };
+        std::int64_t postReleaseGraceMs{ 220 };
+    };
+
+    [[nodiscard]] bool StepPostHoldMenuGuard(
+        PostHoldMenuGuardState& a_state,
+        const PostHoldMenuGuardInput& a_in) noexcept;
+
     [[nodiscard]] SuppressedReadyDecision StepSuppressedSecondaryReady(
         SuppressedReadyState& a_state,
         const SuppressedReadyInput& a_in,
@@ -394,6 +589,7 @@ namespace HUDController
         std::uint32_t ownerFormID{ 0 };
         std::size_t rawListSize{ 0 };
         std::size_t rawStackCount{ 0 };
+        std::size_t rawEquippedStackCount{ 0 };
         std::uint64_t rawTotalCountSum{ 0 };
         bool skipEquipped{ false };
         bool truncatedByCap{ false };
@@ -401,6 +597,7 @@ namespace HUDController
         std::uint64_t generation{ 0 };
         std::vector<QuickContainerItemEntry> items;
         std::unordered_map<std::string, TargetInfo::ItemKind> kindByCleanUpper;
+        std::unordered_map<std::string, float> conditionByCleanUpper;
     };
 
     struct QuickContainerPriorityKey
@@ -463,6 +660,7 @@ namespace HUDController
         void ClearPickedRef();
         void ResetState();
         [[nodiscard]] OverlaySnapshot GetOverlaySnapshot() const;
+        [[nodiscard]] float GetLiveHoldProgress(std::size_t a_actionIdx) const noexcept;
         bool OnHUDAdvance(RE::IMenu* a_hudMenu, float a_timeDelta);
 
         RE::BSEventNotifyControl ProcessEvent(
@@ -536,6 +734,15 @@ namespace HUDController
             RE::PlayerCharacter* a_player,
             RE::QuickContainerMode a_mode,
             const QuickContainerItemEntry& a_target);
+        [[nodiscard]] std::uint64_t CountBoundObjectInInventory(
+            RE::TESObjectREFR* a_invOwner,
+            std::uint32_t a_formID) const;
+        [[nodiscard]] RE::NiPointer<RE::TESObjectREFR> FindThirdPersonAssistTarget(
+            RE::PlayerCharacter* a_player,
+            RE::TESObjectREFR* a_crosshairRef,
+            bool a_looseItemsOnly,
+            const ConfigData& a_cfg,
+            RE::NiCamera* a_cam = nullptr);
 
         inline static REL::Relocation<decltype(&Hook_AdvanceMovie)> _AdvanceMovie;
         inline static std::atomic<std::uintptr_t> _origActivateShouldHandleEvent{ 0 };
@@ -579,6 +786,50 @@ namespace HUDController
         std::atomic<std::uint32_t> _diagReadyBlockLogCount{ 0 };
         std::atomic<std::int64_t> _diagReadyLastLogMs{ 0 };
         std::atomic<std::int64_t> _diagReadyLastActionLogMs{ 0 };
+        std::atomic<std::int64_t> _diagQcTakeFailLastLogMs{ 0 };
+        std::atomic<std::int64_t> _featuredExamineOpenMs{ 0 };
+        std::atomic<bool> _featuredExamineWaitRelease{ false };
+        std::atomic<std::int64_t> _featuredExamineGraceMs{ 600 };
+
+        std::atomic<bool> _tpAssistActive{ false };
+        std::atomic<bool> _tpAssistActivateRequested{ false };
+        std::atomic<bool> _tpAssistActivateLatched{ false };
+
+        std::atomic<bool> _holdPrimaryRequired{ false };
+        std::atomic<bool> _holdSecondaryRequired{ false };
+        std::atomic<bool> _holdPrimaryUseSyntheticTap{ false };
+        std::atomic<bool> _holdInQuickContainer{ false };
+        std::atomic<std::uint64_t> _holdTargetKey{ 0 };
+        std::atomic<std::int64_t> _holdDurationMs{ 500 };
+        std::atomic<float> _holdPrimaryProgress{ 0.0f };
+        std::atomic<float> _holdSecondaryProgress{ 0.0f };
+        std::atomic<bool> _holdPrimaryActivateRequested{ false };
+        std::atomic<bool> _holdPrimaryActive{ false };
+        std::atomic<bool> _holdPrimaryCompleted{ false };
+        std::atomic<std::uint64_t> _holdPrimaryActiveKey{ 0 };
+        std::atomic<std::int64_t> _holdPrimaryStartMs{ 0 };
+        std::atomic<std::int64_t> _holdPrimaryLastSeenMs{ 0 };
+        std::atomic<bool> _holdSecondaryActive{ false };
+        std::atomic<bool> _holdSecondaryCompleted{ false };
+        std::atomic<std::uint64_t> _holdSecondaryActiveKey{ 0 };
+        std::atomic<std::int64_t> _holdSecondaryStartMs{ 0 };
+        std::atomic<std::int64_t> _holdSecondaryLastSeenMs{ 0 };
+        std::atomic<int> _holdWaterTapStage{ 0 };
+        std::atomic<std::int64_t> _holdWaterTapTriggerMs{ 0 };
+        std::atomic<const void*> _holdWaterQueueHead{ nullptr };
+        std::atomic<int> _holdSecTapStage{ 0 };
+        std::atomic<std::int64_t> _holdSecTapTriggerMs{ 0 };
+        std::atomic<const void*> _holdSecQueueHead{ nullptr };
+        std::atomic<bool> _postHoldGuardArmed{ false };
+        std::atomic<bool> _postHoldGuardMenuObserved{ false };
+        std::atomic<bool> _postHoldGuardWaitRelease{ false };
+        std::atomic<std::int64_t> _postHoldGuardTriggerMs{ 0 };
+        std::atomic<std::int64_t> _postHoldGuardMenuOpenMs{ 0 };
+        std::atomic<std::int64_t> _postHoldGuardReleaseMs{ 0 };
+        std::atomic<std::uint32_t> _postHoldGuardDevice{ 0xFFFFFFFFu };
+        std::atomic<std::uint32_t> _postHoldGuardIdCode{ 0xFFFFFFFFu };
+        std::atomic<std::int64_t> _lastAimingMs{ 0 };
+
         std::atomic<bool> _pendingReset{ false };
         std::atomic<bool> _pendingQcInvalidate{ false };
 
@@ -601,6 +852,11 @@ namespace HUDController
         mutable std::mutex _pickMutex;
         RE::ObjectRefHandle _pickedRefHandle{};
         bool _hasPickEvent{ false };
+
+        RE::ObjectRefHandle _tpAssistRefHandle{};
+        std::int64_t _tpAssistLastScanMs{ 0 };
+        std::uint32_t _tpAssistLockedFormID{ 0 };
+        std::int64_t _tpAssistLockStartMs{ 0 };
 
         HUDTransformState _state{};
         HUDTransformState _qcState{};
@@ -629,6 +885,9 @@ namespace HUDController
         bool _cachedQcItemEquipped{ false };
         bool _cachedQcItemLegendary{ false };
         bool _cachedQcItemFavorite{ false };
+        std::uint64_t _cachedQcItemStackSig{ 0 };
+        bool _cachedQcItemHasCondition{ false };
+        float _cachedQcItemConditionPercent{ 100.0f };
         std::int64_t _cachedQcItemTimeMs{ 0 };
         bool _cachedQcItemHasMeta{ false };
         TargetInfo::TargetMetadata _cachedQcItemMeta{};

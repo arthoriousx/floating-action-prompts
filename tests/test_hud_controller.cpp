@@ -2493,6 +2493,430 @@ int main()
         CHECK(HUDController::IsQuickContainerWorkbenchTarget(TargetInfo::ItemKind::Container, true, false, false) == false);
     }
 
+    // 23. Featured item ExamineMenu fast-tap dismiss guard
+    {
+        bool waitRel = true;
+        HUDController::FeaturedExamineInput in{};
+        in.isFeaturedExamineOpen = true;
+        in.isDismissEvent = true;
+        in.openTimeMs = 1000;
+        in.graceMs = 600;
+
+        // Same-key held & initial release are swallowed
+        in.isPressed = true;
+        in.isReleased = false;
+        in.isJustPressed = false;
+        in.nowMs = 1020;
+        CHECK(HUDController::StepFeaturedExamineGuard(waitRel, in) == true);
+        CHECK(waitRel == true);
+
+        in.isPressed = false;
+        in.isReleased = true;
+        in.nowMs = 1060;
+        CHECK(HUDController::StepFeaturedExamineGuard(waitRel, in) == true);
+        CHECK(waitRel == false);
+
+        // Fast second tap inside grace window (e.g. +200ms) is swallowed
+        in.isPressed = true;
+        in.isReleased = false;
+        in.isJustPressed = true;
+        in.nowMs = 1200;
+        CHECK(HUDController::StepFeaturedExamineGuard(waitRel, in) == true);
+
+        // Tap after grace window (e.g. +700ms) is allowed
+        in.nowMs = 1700;
+        CHECK(HUDController::StepFeaturedExamineGuard(waitRel, in) == false);
+
+        // Non-featured ExamineMenu (workbenches) never swallowed
+        waitRel = true;
+        in.isFeaturedExamineOpen = false;
+        in.nowMs = 1010;
+        CHECK(HUDController::StepFeaturedExamineGuard(waitRel, in) == false);
+
+        // graceMs == 0 disables featured item guard completely
+        waitRel = true;
+        in.isFeaturedExamineOpen = true;
+        in.graceMs = 0;
+        in.isPressed = true;
+        in.isReleased = false;
+        in.nowMs = 1010;
+        CHECK(HUDController::StepFeaturedExamineGuard(waitRel, in) == false);
+        CHECK(waitRel == false);
+    }
+
+    // 24. Aiming (ADS) suppression & per-action non-companion NPC distance filtering
+    {
+        CHECK(HUDController::IsRangedNpcActionVerb("ROB") == true);
+        CHECK(HUDController::IsRangedNpcActionVerb("ROBBERY") == true);
+        CHECK(HUDController::IsRangedNpcActionVerb("PROBE") == false);
+        CHECK(HUDController::ShouldSuppressForAiming(0, true, true, false) == false);
+        CHECK(HUDController::ShouldSuppressForAiming(1, true, true, false) == true);
+        CHECK(HUDController::ShouldSuppressForAiming(1, true, false, false) == false);
+        CHECK(HUDController::ShouldSuppressForAiming(1, false, true, false) == false);
+        CHECK(HUDController::ShouldSuppressForAiming(2, true, false, false) == true);
+        CHECK(HUDController::ShouldSuppressForAiming(2, true, false, true) == true);
+
+        // Distant Raider with both [E] PICKPOCKET and [R] OVERTURE keeps OVERTURE only
+        std::vector<HUDController::ButtonHintEntry> actions = {
+            { "E", "PICKPOCKET", true },
+            { "R", "OVERTURE", true }
+        };
+        const bool suppress = HUDController::FilterNpcPromptActions(
+            actions, true, 900.0f, true, 185.0f, true);
+        CHECK(suppress == false);
+        CHECK(actions.size() == 1);
+        CHECK(actions[0].key == "R");
+        CHECK(actions[0].label == "OVERTURE");
+
+        // Distant NPC with only close-range [E] TALK gets suppressed completely
+        std::vector<HUDController::ButtonHintEntry> talkOnly = {
+            { "E", "TALK", true }
+        };
+        CHECK(HUDController::FilterNpcPromptActions(
+            talkOnly, true, 400.0f, true, 185.0f, true) == true);
+        CHECK(talkOnly.empty());
+
+        // Distant NPC with ranged action beyond rangedMaxDistance gets suppressed too
+        std::vector<HUDController::ButtonHintEntry> tooFarRanged = {
+            { "E", "PICKPOCKET", true },
+            { "R", "OVERTURE", true }
+        };
+        CHECK(HUDController::FilterNpcPromptActions(
+            tooFarRanged, true, 600.0f, true, 185.0f, true, 450.0f) == true);
+        CHECK(tooFarRanged.empty());
+
+        // Distant NPC within rangedMaxDistance keeps ranged actions
+        std::vector<HUDController::ButtonHintEntry> withinRanged = {
+            { "E", "PICKPOCKET", true },
+            { "R", "OVERTURE", true }
+        };
+        CHECK(HUDController::FilterNpcPromptActions(
+            withinRanged, true, 320.0f, true, 185.0f, true, 450.0f) == false);
+        CHECK(withinRanged.size() == 1 && withinRanged[0].label == "OVERTURE");
+
+        // Post-ADS aiming cooldown prevents single-frame flash on release
+        std::int64_t lastAimMs = 0;
+        CHECK(HUDController::IsAimingWithCooldown(true, 1000, lastAimMs, 280) == true);
+        CHECK(HUDController::IsAimingWithCooldown(false, 1150, lastAimMs, 280) == true);
+        CHECK(HUDController::IsAimingWithCooldown(false, 1300, lastAimMs, 280) == false);
+
+        // Within range preserves all actions
+        std::vector<HUDController::ButtonHintEntry> closeNpc = {
+            { "E", "PICKPOCKET", true },
+            { "R", "OVERTURE", true }
+        };
+        CHECK(HUDController::FilterNpcPromptActions(
+            closeNpc, true, 140.0f, true, 185.0f, true) == false);
+        CHECK(closeNpc.size() == 2);
+    }
+
+    // 25. Third-person character-facing proximity assist scoring & override rules
+    {
+        const float minCos = std::cos(55.0f * (3.14159265f / 180.0f));
+        HUDController::ThirdPersonAssistCandidate closeItem{ 45.0f, 0.96f, 0.0f, false, true, false };
+        HUDController::ThirdPersonAssistCandidate sideDoor{ 90.0f, 0.65f, 0.0f, false, false, false };
+        HUDController::ThirdPersonAssistCandidate outCone{ 40.0f, 0.10f, 0.0f, false, true, false };
+        HUDController::ThirdPersonAssistCandidate tooFar{ 180.0f, 1.0f, 0.0f, false, true, false };
+
+        const float sItem = HUDController::ScoreThirdPersonCandidate(closeItem, 130.0f, minCos);
+        const float sDoor = HUDController::ScoreThirdPersonCandidate(sideDoor, 130.0f, minCos);
+        CHECK(sItem > sDoor);
+        CHECK(HUDController::ScoreThirdPersonCandidate(outCone, 130.0f, minCos) < 0.0f);
+        CHECK(HUDController::ScoreThirdPersonCandidate(tooFar, 130.0f, minCos) < 0.0f);
+
+        // QuickLoot visible never overridden
+        CHECK(HUDController::ShouldThirdPersonAssistOverrideCrosshair(1, true, true, false, 200.0f, 130.0f) == false);
+        // Empty crosshair overridden in both modes
+        CHECK(HUDController::ShouldThirdPersonAssistOverrideCrosshair(0, false, false, false, 0.0f, 130.0f) == true);
+        CHECK(HUDController::ShouldThirdPersonAssistOverrideCrosshair(1, false, false, false, 0.0f, 130.0f) == true);
+        // Conservative Smart Hybrid does NOT override close/mid crosshair targets (e.g. 120u couch), only > 155u
+        CHECK(HUDController::ShouldThirdPersonAssistOverrideCrosshair(0, true, false, false, 170.0f, 130.0f) == false);
+        CHECK(HUDController::ShouldThirdPersonAssistOverrideCrosshair(1, true, false, false, 120.0f, 130.0f) == false);
+        CHECK(HUDController::ShouldThirdPersonAssistOverrideCrosshair(1, true, false, false, 170.0f, 130.0f) == true);
+        // Close loose item already under crosshair is never overridden
+        CHECK(HUDController::ShouldThirdPersonAssistOverrideCrosshair(1, true, false, true, 60.0f, 130.0f) == false);
+    }
+
+    // 26. Hold-to-Activate verb matching & state machine
+    {
+        ConfigData cfg{};
+        cfg.holdToActivateEnabled = true;
+        cfg.holdDrink = true;
+        cfg.holdSitSleep = true;
+        cfg.holdStealPickpocket = true;
+        cfg.holdEatCannibal = false;
+        cfg.holdCraftPowerArmor = false;
+        cfg.holdCustomVerbs = "HARVEST, DISARM";
+
+        CHECK(HUDController::DoesActionRequireHold("DRINK", false, TargetInfo::ItemKind::None, false, cfg) == true);
+        CHECK(HUDController::DoesActionRequireHold("SIT", false, TargetInfo::ItemKind::Furniture, false, cfg) == true);
+        CHECK(HUDController::DoesActionRequireHold("SLEEP", false, TargetInfo::ItemKind::Furniture, false, cfg) == true);
+        CHECK(HUDController::DoesActionRequireHold("STEAL", true, TargetInfo::ItemKind::Aid, false, cfg) == true);
+        CHECK(HUDController::DoesActionRequireHold("OPEN", true, TargetInfo::ItemKind::Door, true, cfg) == false);
+        CHECK(HUDController::DoesActionRequireHold("TAKE", false, TargetInfo::ItemKind::Weapon, false, cfg) == false);
+        CHECK(HUDController::DoesActionRequireHold("EAT", false, TargetInfo::ItemKind::Aid, false, cfg) == false);
+        CHECK(HUDController::DoesActionRequireHold("HARVEST", false, TargetInfo::ItemKind::Aid, false, cfg) == true);
+        CHECK(HUDController::DoesActionRequireHold("DISARM MINE", false, TargetInfo::ItemKind::Weapon, false, cfg) == true);
+
+        cfg.holdCraftPowerArmor = true;
+        CHECK(HUDController::DoesActionRequireHold("ENTER", false, TargetInfo::ItemKind::Furniture, false, cfg) == true);
+        CHECK(HUDController::DoesActionRequireHold("ENTER", false, TargetInfo::ItemKind::Door, true, cfg) == false);
+
+        HUDController::HoldToActivateState st{};
+        HUDController::HoldToActivateInput hIn{};
+        hIn.requiresHold = true;
+        hIn.targetKey = 42;
+        hIn.isJustPressed = true;
+        hIn.isPressed = true;
+
+        auto d = HUDController::StepHoldToActivate(st, hIn, 1000, 500);
+        CHECK(d.swallowEvent == true);
+        CHECK(d.triggerNow == false);
+        CHECK_NEAR(d.progress, 0.0f, 0.001f);
+
+        hIn.isJustPressed = false;
+        d = HUDController::StepHoldToActivate(st, hIn, 1250, 500);
+        CHECK(d.swallowEvent == true);
+        CHECK(d.triggerNow == false);
+        CHECK_NEAR(d.progress, 0.5f, 0.01f);
+
+        d = HUDController::StepHoldToActivate(st, hIn, 1500, 500);
+        CHECK(d.swallowEvent == true);
+        CHECK(d.triggerNow == true);
+        CHECK_NEAR(d.progress, 1.0f, 0.001f);
+
+        // Holding past completion does NOT re-trigger
+        d = HUDController::StepHoldToActivate(st, hIn, 1700, 500);
+        CHECK(d.swallowEvent == true);
+        CHECK(d.triggerNow == false);
+
+        // Release resets cleanly and swallows release
+        hIn.isPressed = false;
+        hIn.isReleased = true;
+        d = HUDController::StepHoldToActivate(st, hIn, 1750, 500);
+        CHECK(d.swallowEvent == true);
+        CHECK(d.triggerNow == false);
+        CHECK(st.active == false && st.completedWaitingRelease == false);
+
+        // SyntheticHoldTap MC -> PC -> UI -> HUD sequence across Frame N, N+1, N+2
+        int tapStage = 1;
+        const int dummyQ1 = 1;
+        const int dummyQ2 = 2;
+        const int dummyQ3 = 3;
+        const void* tapQH = &dummyQ1;
+        std::int64_t tapMs = 2000;
+        // Frame N PC/UI/HUD pass synthetic press through
+        CHECK(HUDController::StepSyntheticHoldTap(tapStage, tapQH, tapMs, &dummyQ1, false, 2000) ==
+              HUDController::SyntheticHoldTapAction::kPassPress);
+        // Frame N+1 MC sees held -> mutates to synthetic release and enters stage 2
+        CHECK(HUDController::StepSyntheticHoldTap(tapStage, tapQH, tapMs, &dummyQ2, false, 2016) ==
+              HUDController::SyntheticHoldTapAction::kPassRelease);
+        CHECK(tapStage == 2);
+        // Frame N+1 PC/UI/HUD sees zeroed analog (a_isReleased == true) on SAME qh -> MUST STILL PASS RELEASE!
+        CHECK(HUDController::StepSyntheticHoldTap(tapStage, tapQH, tapMs, &dummyQ2, true, 2016) ==
+              HUDController::SyntheticHoldTapAction::kPassRelease);
+        CHECK(tapStage == 2);
+        // Frame N+2 still holding physically -> swallow
+        CHECK(HUDController::StepSyntheticHoldTap(tapStage, tapQH, tapMs, &dummyQ3, false, 2032) ==
+              HUDController::SyntheticHoldTapAction::kSwallow);
+        // Frame N+3 physical release -> swallow and reset
+        CHECK(HUDController::StepSyntheticHoldTap(tapStage, tapQH, tapMs, &dummyQ3, true, 2080) ==
+              HUDController::SyntheticHoldTapAction::kSwallowAndResetHold);
+        CHECK(tapStage == 0);
+
+        // Natural physical release right at Frame N+1 drains via stage 3 across MC -> PC -> Frame N+2
+        tapStage = 1;
+        tapQH = &dummyQ1;
+        tapMs = 3000;
+        CHECK(HUDController::StepSyntheticHoldTap(tapStage, tapQH, tapMs, &dummyQ2, true, 3016) ==
+              HUDController::SyntheticHoldTapAction::kPassReleaseAndResetHold);
+        CHECK(tapStage == 3);
+        CHECK(HUDController::StepSyntheticHoldTap(tapStage, tapQH, tapMs, &dummyQ2, true, 3016) ==
+              HUDController::SyntheticHoldTapAction::kPassReleaseAndResetHold);
+        CHECK(HUDController::StepSyntheticHoldTap(tapStage, tapQH, tapMs, &dummyQ3, false, 3032) ==
+              HUDController::SyntheticHoldTapAction::kInactive);
+        CHECK(tapStage == 0);
+
+        // Water prompt anchor lands near water surface in front of player instead of far lake center
+        const Vector3 pPos{ 100.0f, 200.0f, 50.0f };
+        const Vector3 camPos{ 80.0f, 140.0f, 190.0f };
+        const Vector3 camFwd{ 0.0f, 0.90f, -0.43f };
+        const Vector3 wAnchor = HUDController::ComputeWaterPromptAnchor(pPos, 0.0f, camPos, camFwd, 45.0f, 105.0f);
+        CHECK_NEAR(wAnchor.z, 57.0f, 0.01f);
+        CHECK(std::hypot(wAnchor.x - pPos.x, wAnchor.y - pPos.y) <= 105.01f);
+
+        // Passive mirror enrichment + expanded merge propagate NEC/PA item condition cleanly
+        HUDController::CachedInventorySnapshot condSnap;
+        condSnap.ownerFormID = 0x1234u;
+        condSnap.generation = 1;
+        condSnap.kindByCleanUpper["10MM PISTOL"] = TargetInfo::ItemKind::Weapon;
+        condSnap.conditionByCleanUpper["10MM PISTOL"] = 38.0f;
+
+        HUDController::QuickContainerItemEntry condInv;
+        condInv.name = "10mm Pistol";
+        condInv.itemKind = TargetInfo::ItemKind::Weapon;
+        condInv.hasCondition = true;
+        condInv.conditionPercent = 38.0f;
+        condSnap.items.push_back(condInv);
+
+        HUDController::QuickContainerMergeCache condCache;
+        std::vector<HUDController::QuickContainerItemEntry> rawPassive(1);
+        rawPassive[0].name = "10mm Pistol";
+        const auto& passiveMerged = HUDController::ResolveMergedQuickContainerWindow(
+            condCache, 0x1234u, condSnap, rawPassive, 0, 5, false);
+        CHECK(passiveMerged.windowItems.size() == 1);
+        CHECK(passiveMerged.windowItems[0].itemKind == TargetInfo::ItemKind::Weapon);
+        CHECK(passiveMerged.windowItems[0].hasCondition);
+        CHECK_NEAR(passiveMerged.windowItems[0].conditionPercent, 38.0f, 0.01f);
+
+        // Third-person proximity assist LOS clearance rejects underground/rubble-blocked refs & strict wall hits
+        CHECK(HUDController::IsThirdPersonAssistLosClear(false, false, 0.0f, 90.0f, 0.0f));
+        CHECK(HUDController::IsThirdPersonAssistLosClear(true, true, 0.45f, 90.0f, -20.0f));
+        CHECK(!HUDController::IsThirdPersonAssistLosClear(true, false, 0.90f, 100.0f, 0.0f));
+        CHECK(HUDController::IsThirdPersonAssistLosClear(true, false, 0.97f, 100.0f, 0.0f));
+        CHECK(!HUDController::IsThirdPersonAssistLosClear(true, false, 0.97f, 100.0f, 0.0f, true));
+        CHECK(HUDController::IsThirdPersonAssistLosClear(true, false, 0.97f, 100.0f, 0.0f, true, true));
+        CHECK(!HUDController::IsThirdPersonAssistLosClear(true, false, 0.80f, 100.0f, 0.0f, true, true));
+        CHECK(HUDController::IsThirdPersonAssistLosClear(true, true, 0.50f, 100.0f, 0.0f, true));
+
+        // StepSyntheticHoldTap stage 2 timeout prevents stuck synthetic hold on lost release/target
+        int tStage = 2;
+        const int dummyQhA = 1;
+        const int dummyQhB = 2;
+        const void* tQh = &dummyQhA;
+        std::int64_t tTrigMs = 1000;
+        CHECK(HUDController::StepSyntheticHoldTap(tStage, tQh, tTrigMs, &dummyQhB, false, 2600, 1500) ==
+              HUDController::SyntheticHoldTapAction::kSwallow);
+        CHECK(tStage == 0);
+        CHECK(tQh == nullptr);
+        CHECK(!HUDController::IsThirdPersonAssistLosClear(true, false, 0.99f, 100.0f, -15.0f));
+
+        // Solid wall collision layers
+        CHECK(HUDController::IsSolidWallCollisionLayer(1));   // kStatic
+        CHECK(HUDController::IsSolidWallCollisionLayer(2));   // kAnimStatic
+        CHECK(HUDController::IsSolidWallCollisionLayer(13));  // kTerrain
+        CHECK(HUDController::IsSolidWallCollisionLayer(17));  // kGround
+        CHECK(HUDController::IsSolidWallCollisionLayer(27));  // kInvisibleWall
+        CHECK(HUDController::IsSolidWallCollisionLayer(35));  // kCollisionBox
+        CHECK(!HUDController::IsSolidWallCollisionLayer(40)); // kItemPicker
+
+        // Water ACTIVATE hold-to-activate (primary slot only, never forces FILL BOTTLE)
+        ConfigData wCfg{};
+        wCfg.holdToActivateEnabled = true;
+        wCfg.holdDrink = true;
+        CHECK(HUDController::DoesActionRequireHold("ACTIVATE", false, TargetInfo::ItemKind::None, false, wCfg, true));
+        CHECK(!HUDController::DoesActionRequireHold("ACTIVATE", false, TargetInfo::ItemKind::None, false, wCfg, false));
+        CHECK(!HUDController::DoesActionRequireHold("FILL BOTTLE", false, TargetInfo::ItemKind::None, false, wCfg, false));
+
+        // Disallowed oil/dummy names and generic ACTI "ACTIVATE" verb in Proximity Assist
+        CHECK(HUDController::IsDisallowedAssistTargetNameOrVerb("Default Dummy", "Activate", true));
+        CHECK(HUDController::IsDisallowedAssistTargetNameOrVerb("Oil Pool", "Activate", true));
+        CHECK(HUDController::IsDisallowedAssistTargetNameOrVerb("Cambridge Trigger", "ACTIVATE", true));
+        CHECK(!HUDController::IsDisallowedAssistTargetNameOrVerb("Elevator Button", "PUSH", true));
+        CHECK(!HUDController::IsDisallowedAssistTargetNameOrVerb("Ammo Box", "ACTIVATE", false));
+
+        // 3D crosshair priority outweighs closer floor item when crosshair aim is on shelf item
+        HUDController::ThirdPersonAssistCandidate shelfItem{};
+        shelfItem.dist = 75.0f;
+        shelfItem.forwardDot = 0.85f;
+        shelfItem.crosshairDot = 0.96f;
+        shelfItem.hasCrosshairDot = true;
+        shelfItem.isLooseItem = true;
+        HUDController::ThirdPersonAssistCandidate floorItem{};
+        floorItem.dist = 55.0f;
+        floorItem.forwardDot = 0.90f;
+        floorItem.crosshairDot = 0.30f;
+        floorItem.hasCrosshairDot = true;
+        floorItem.isLooseItem = true;
+        CHECK(HUDController::ScoreThirdPersonCandidate(shelfItem, 130.0f, 0.50f) >
+              HUDController::ScoreThirdPersonCandidate(floorItem, 130.0f, 0.50f));
+
+        // Sticky assist target lock window behavior
+        CHECK(HUDController::ShouldKeepLockedThirdPersonTarget(0x1234u, 1000, 1250, 300, true, false));
+        CHECK(!HUDController::ShouldKeepLockedThirdPersonTarget(0x1234u, 1000, 1300, 300, true, false));
+        CHECK(!HUDController::ShouldKeepLockedThirdPersonTarget(0x1234u, 1000, 1100, 300, false, false));
+        CHECK(!HUDController::ShouldKeepLockedThirdPersonTarget(0x1234u, 1000, 1100, 300, true, true));
+        CHECK(!HUDController::ShouldKeepLockedThirdPersonTarget(0x1234u, 1000, 1100, 0, true, false));
+
+        // Post-hold menu guard shields newly opened menus (e.g. SleepWaitMenu) from held/released E
+        HUDController::PostHoldMenuGuardState mg{};
+        mg.armed = true;
+        mg.waitRelease = true;
+        mg.triggerMs = 1000;
+        mg.boundDevice = 0;
+        mg.boundIdCode = 18;
+
+        // Menu opens at t=1030 with E still held -> swallowed
+        HUDController::PostHoldMenuGuardInput mIn{};
+        mIn.inMenuMode = true;
+        mIn.isMatchingPhysicalKey = true;
+        mIn.isConfirmFamilyEvent = true;
+        mIn.isPressed = true;
+        mIn.isReleased = false;
+        mIn.nowMs = 1030;
+        CHECK(HUDController::StepPostHoldMenuGuard(mg, mIn));
+        CHECK(mg.armed && mg.menuObserved && mg.waitRelease);
+
+        // Non-confirm navigation keys (arrows) pass through immediately even while guard is armed
+        HUDController::PostHoldMenuGuardInput navIn{};
+        navIn.inMenuMode = true;
+        navIn.isMatchingPhysicalKey = false;
+        navIn.isConfirmFamilyEvent = false;
+        navIn.isPressed = true;
+        navIn.nowMs = 1050;
+        CHECK(!HUDController::StepPostHoldMenuGuard(mg, navIn));
+
+        // Player releases E at t=1150 -> release is swallowed and grace window begins
+        HUDController::PostHoldMenuGuardInput relIn = mIn;
+        relIn.isPressed = false;
+        relIn.isReleased = true;
+        relIn.nowMs = 1150;
+        CHECK(HUDController::StepPostHoldMenuGuard(mg, relIn));
+        CHECK(mg.armed && !mg.waitRelease);
+
+        // Bounce confirm within 220ms grace window is still swallowed
+        HUDController::PostHoldMenuGuardInput bounceIn = mIn;
+        bounceIn.isJustPressed = true;
+        bounceIn.nowMs = 1280;
+        CHECK(HUDController::StepPostHoldMenuGuard(mg, bounceIn));
+
+        // Fresh deliberate confirm after grace window (> 1150 + 220) passes through and disarms
+        HUDController::PostHoldMenuGuardInput okIn = mIn;
+        okIn.isJustPressed = true;
+        okIn.nowMs = 1400;
+        CHECK(!HUDController::StepPostHoldMenuGuard(mg, okIn));
+        CHECK(!mg.armed);
+
+        // Early release before menu opens still shields 220ms after menu opens
+        HUDController::PostHoldMenuGuardState mgEarly{};
+        mgEarly.armed = true;
+        mgEarly.waitRelease = true;
+        mgEarly.triggerMs = 2000;
+        mgEarly.boundDevice = 0;
+        mgEarly.boundIdCode = 18;
+        HUDController::PostHoldMenuGuardInput preRel{};
+        preRel.inMenuMode = false;
+        preRel.isMatchingPhysicalKey = true;
+        preRel.isReleased = true;
+        preRel.nowMs = 2020;
+        CHECK(!HUDController::StepPostHoldMenuGuard(mgEarly, preRel));
+        CHECK(mgEarly.armed && !mgEarly.waitRelease);
+        HUDController::PostHoldMenuGuardInput openAfter = mIn;
+        openAfter.nowMs = 2050;
+        CHECK(HUDController::StepPostHoldMenuGuard(mgEarly, openAfter));
+
+        // Guard expires cleanly if no menu ever opens within armWindowMs
+        HUDController::PostHoldMenuGuardState mgExp{};
+        mgExp.armed = true;
+        mgExp.waitRelease = true;
+        mgExp.triggerMs = 3000;
+        HUDController::PostHoldMenuGuardInput lateIn{};
+        lateIn.inMenuMode = false;
+        lateIn.nowMs = 4500;
+        CHECK(!HUDController::StepPostHoldMenuGuard(mgExp, lateIn));
+        CHECK(!mgExp.armed);
+    }
+
     std::cout << "[TEST] test_hud_controller PASSED" << std::endl;
     return 0;
 }

@@ -7,6 +7,10 @@
 #include <cstdio>
 #include <utility>
 
+#ifndef FAP_UNIT_TEST
+#include <Windows.h>
+#endif
+
 namespace TargetInfo
 {
     namespace
@@ -162,6 +166,8 @@ namespace TargetInfo
                         }
                     }
                 }
+            } else if (s.starts_with("|+")) {
+                closePos = 1;
             } else if (s.front() == '|') {
                 const auto pos = s.find('|', 1);
                 if (pos != std::string::npos && pos < 32) {
@@ -180,6 +186,11 @@ namespace TargetInfo
                 break;
             }
             s = remainder;
+        }
+
+        // Replace any remaining FIS subtitle marker ("|+") with a single space
+        for (std::size_t pos = s.find("|+"); pos != std::string::npos; pos = s.find("|+", pos)) {
+            s.replace(pos, 2, " ");
         }
 
         // 3. Collapse multiple spaces cleanly
@@ -460,6 +471,16 @@ namespace TargetInfo
             rows.push_back({ "Armor Rating", std::to_string(a_meta.armorRating) });
         }
 
+        if (a_meta.hasCondition && a_cfg.infoCardConditionDisplay != 0) {
+            rows.push_back({
+                "Condition",
+                (a_cfg.infoCardConditionDisplay == 1)
+                    ? std::string{}
+                    : FormatConditionPercent(a_meta.conditionPercent),
+                true
+            });
+        }
+
         if (!a_meta.scrapComponents.empty() && a_cfg.showScrapComponents) {
             rows.push_back({ "Components", FormatComponentsList(a_meta.scrapComponents, 0) });
         }
@@ -474,6 +495,74 @@ namespace TargetInfo
         }
 
         return rows;
+    }
+
+    ConditionResult ResolveItemCondition(const ConditionResolveInput& a_in) noexcept
+    {
+        ConditionResult res;
+        const auto sanitizedHealthPct = [&]() noexcept -> float {
+            if (!std::isfinite(a_in.rawHealth)) {
+                return 0.0f;
+            }
+            return std::clamp(a_in.rawHealth * 100.0f, 0.0f, 100.0f);
+        };
+
+        if (a_in.isPowerArmor && a_in.itemKind == ItemKind::Armor) {
+            res.hasCondition = true;
+            res.conditionPercent = a_in.hasExtraHealth ? sanitizedHealthPct() : 100.0f;
+            return res;
+        }
+
+        if (a_in.itemKind == ItemKind::Weapon || a_in.itemKind == ItemKind::Armor) {
+            if (a_in.hasExtraHealth) {
+                res.hasCondition = true;
+                res.conditionPercent = sanitizedHealthPct();
+            } else if (a_in.necInstalled) {
+                res.hasCondition = true;
+                res.conditionPercent = 100.0f;
+            }
+            return res;
+        }
+
+        if (a_in.itemKind == ItemKind::Aid && a_in.necInstalled && a_in.hasExtraHealth) {
+            res.hasCondition = true;
+            res.conditionPercent = sanitizedHealthPct();
+        }
+        return res;
+    }
+
+    std::uint32_t GetConditionColorRgb(float a_conditionPercent, std::uint32_t a_normalRgb) noexcept
+    {
+        const float pct = std::isfinite(a_conditionPercent) ? a_conditionPercent : 0.0f;
+        if (pct < 20.0f) {
+            return 0xFF4D4Du;
+        }
+        if (pct < 50.0f) {
+            return 0xF6C86Eu;
+        }
+        return a_normalRgb;
+    }
+
+    std::string FormatConditionPercent(float a_conditionPercent)
+    {
+        const float clamped = std::isfinite(a_conditionPercent)
+            ? std::clamp(a_conditionPercent, 0.0f, 100.0f)
+            : 0.0f;
+        int rounded = static_cast<int>(std::lround(clamped));
+        if (clamped > 0.0f && rounded == 0) {
+            rounded = 1;
+        }
+        return std::to_string(rounded) + "%";
+    }
+
+    bool IsNecInstalled() noexcept
+    {
+#ifdef FAP_UNIT_TEST
+        return false;
+#else
+        static const bool s_installed = (GetModuleHandleW(L"NEC.dll") != nullptr);
+        return s_installed;
+#endif
     }
 
 #ifndef FAP_UNIT_TEST
@@ -506,15 +595,25 @@ namespace TargetInfo
             return SafeFullName(a_base);
         }
 
+        [[nodiscard]] std::uintptr_t ResolveVtableAddress(REL::ID a_id)
+        {
+            const auto resolved = REL::IDDatabase::get().resolve(a_id);
+            if (!resolved.rva || *resolved.rva == 0) {
+                return 0;
+            }
+            return REL::Module::get().base() + *resolved.rva;
+        }
+
         [[nodiscard]] bool IsWeaponInstanceData(const RE::TBO_InstanceData* a_ptr)
         {
             if (!a_ptr) {
                 return false;
             }
+            static const std::uintptr_t weapInstVtbl = ResolveVtableAddress(RE::TESObjectWEAP::InstanceData::VTABLE[0]);
+            static const std::uintptr_t weapDataVtbl = ResolveVtableAddress(RE::TESObjectWEAP::Data::VTABLE[0]);
             const auto vtbl = *reinterpret_cast<const std::uintptr_t*>(a_ptr);
-            const auto weapInstVtbl = REL::Relocation<std::uintptr_t>{ RE::TESObjectWEAP::InstanceData::VTABLE[0] }.address();
-            const auto weapDataVtbl = REL::Relocation<std::uintptr_t>{ RE::TESObjectWEAP::Data::VTABLE[0] }.address();
-            return vtbl == weapInstVtbl || vtbl == weapDataVtbl;
+            return (weapInstVtbl != 0 && vtbl == weapInstVtbl) ||
+                   (weapDataVtbl != 0 && vtbl == weapDataVtbl);
         }
 
         [[nodiscard]] bool IsArmorInstanceData(const RE::TBO_InstanceData* a_ptr)
@@ -522,9 +621,9 @@ namespace TargetInfo
             if (!a_ptr) {
                 return false;
             }
+            static const std::uintptr_t armoInstVtbl = ResolveVtableAddress(RE::TESObjectARMO::InstanceData::VTABLE[0]);
             const auto vtbl = *reinterpret_cast<const std::uintptr_t*>(a_ptr);
-            const auto armoInstVtbl = REL::Relocation<std::uintptr_t>{ RE::TESObjectARMO::InstanceData::VTABLE[0] }.address();
-            return vtbl == armoInstVtbl;
+            return armoInstVtbl != 0 && vtbl == armoInstVtbl;
         }
 
         void PopulateBoundObjectMetadata(
@@ -664,8 +763,48 @@ namespace TargetInfo
                 a_meta.value = (static_cast<std::int32_t>(rawVal) < 0) ? 0u : rawVal;
                 const float rawWt = RE::TESWeightForm::GetFormWeight(a_baseObj, instData);
                 a_meta.weight = (!std::isfinite(rawWt) || rawWt < 0.0f) ? 0.0f : rawWt;
+
+                const ConditionResult cond = ResolveObjectCondition(a_baseObj, a_extraList, a_meta.itemKind, instData);
+                a_meta.hasCondition = cond.hasCondition;
+                a_meta.conditionPercent = cond.conditionPercent;
             }
         }
+    }
+
+    ConditionResult ResolveObjectCondition(
+        const RE::TESBoundObject* a_baseObj,
+        RE::ExtraDataList* a_extraList,
+        ItemKind a_kind,
+        const RE::TBO_InstanceData* a_instData)
+    {
+        if (!a_baseObj) {
+            return {};
+        }
+        if (a_kind != ItemKind::Weapon && a_kind != ItemKind::Armor && a_kind != ItemKind::Aid) {
+            return {};
+        }
+
+        bool isPowerArmor = false;
+        if (a_kind == ItemKind::Armor) {
+            static const RE::BGSKeyword* const s_paKw = []() -> const RE::BGSKeyword* {
+                if (auto* kw = RE::TESForm::GetFormByEditorID<RE::BGSKeyword>("ArmorTypePower"sv)) {
+                    return kw;
+                }
+                return RE::TESForm::GetFormByID<RE::BGSKeyword>(0x0004D8A1);
+            }();
+            const auto* armo = a_baseObj->As<RE::TESObjectARMO>();
+            const auto* baseKw = armo ? static_cast<const RE::BGSKeywordForm*>(armo) : nullptr;
+            isPowerArmor = (baseKw && s_paKw && baseKw->HasKeyword(s_paKw, a_instData));
+        }
+
+        const auto* healthEx = a_extraList ? a_extraList->GetByType<RE::ExtraHealth>() : nullptr;
+        ConditionResolveInput in;
+        in.itemKind = a_kind;
+        in.isPowerArmor = isPowerArmor;
+        in.hasExtraHealth = (healthEx != nullptr);
+        in.rawHealth = healthEx ? healthEx->health : 0.0f;
+        in.necInstalled = IsNecInstalled();
+        return ResolveItemCondition(in);
     }
 
     ItemKind ClassifyBoundObject(const RE::TESBoundObject* a_baseObj)

@@ -108,10 +108,16 @@ extern "C" DLLEXPORT bool F4SEAPI F4SEPlugin_Load(const F4SE::LoadInterface* a_f
     }
 
     F4SE::Init(a_f4se);
-    logger::info("{} v{} initializing on runtime {}",
+    const auto& relMod = REL::Module::get();
+    const char* runtimeFamily =
+        relMod.is_ae() ? "AE" :
+        relMod.is_ng() ? "NG" :
+        relMod.is_og() ? "OG" : "Unknown";
+    logger::info("{} v{} initializing on runtime {} ({})",
         Plugin::NAME,
         Plugin::VERSION_STRING,
-        a_f4se->RuntimeVersion().string());
+        a_f4se->RuntimeVersion().string(),
+        runtimeFamily);
 
     const auto messaging = F4SE::GetMessagingInterface();
     if (!messaging || !messaging->RegisterListener(OnF4SEMessage)) {
